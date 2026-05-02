@@ -7,7 +7,7 @@ edition = "2024"
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 clap = { version = "4.5", features = ["derive", "env"] }
-constitute-protocol = { git = "https://github.com/Aux0x7F/constitute-protocol.git", branch = "logging-primitives" }
+constitute-protocol = { git = "https://github.com/Aux0x7F/constitute-protocol.git", branch = "main" }
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
