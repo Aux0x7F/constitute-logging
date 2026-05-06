@@ -146,7 +146,7 @@ impl LoggingEngine {
     }
 
     pub fn search(&self, query: EventSearchQuery) -> Result<EventSearchResponse> {
-        let limit = query.limit.unwrap_or(100).clamp(1, 1000);
+        let limit = query.limit.unwrap_or(100).clamp(1, 5000);
         let db = self.lock_db()?;
         let mut stmt = db.prepare("select event_json from events order by occurred_at desc")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
@@ -161,6 +161,27 @@ impl LoggingEngine {
             }
         }
         Ok(EventSearchResponse { events })
+    }
+
+    pub fn count_matching(&self, query: EventSearchQuery) -> Result<u64> {
+        self.count_matching_with(query, |_| true)
+    }
+
+    pub fn count_matching_with<F>(&self, query: EventSearchQuery, mut include: F) -> Result<u64>
+    where
+        F: FnMut(&LogEventEnvelope) -> bool,
+    {
+        let db = self.lock_db()?;
+        let mut stmt = db.prepare("select event_json from events order by occurred_at desc")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut count = 0u64;
+        for row in rows {
+            let event: LogEventEnvelope = serde_json::from_str(&row?)?;
+            if matches_query(&event, &query) && include(&event) {
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 
     fn insert_event(&self, producer_id: &str, event: &LogEventEnvelope) -> Result<bool> {
