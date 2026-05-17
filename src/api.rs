@@ -6,12 +6,16 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use constitute_protocol::{
     CAPABILITY_PROJECTION_DELTA_APPLY, CAPABILITY_PROJECTION_OBSERVE, CaacEnvelope,
-    EncryptedDetailRef, LogCategory, LogEventEnvelope, LogOutcome, LogSeverity, ProjectionDeltaOp,
+    EncryptedDetailRef, LOG_EVIDENCE_DETAIL_CUSTODY_ENCRYPTED_DETAIL_REF,
+    LOG_EVIDENCE_PROFILE_EVENT_MEDIA_PATH, LOG_EVIDENCE_PROFILE_EVENT_RUNTIME_DIAGNOSTIC,
+    LOG_EVIDENCE_PROFILE_EVENT_SECURITY_AUDIT, LOG_EVIDENCE_PROFILE_EVENT_SERVICE_EVENT,
+    LOG_EVIDENCE_PROFILE_EVENT_STORAGE_ACCESS, LOG_EVIDENCE_PROFILE_KIND, LogCategory,
+    LogEventEnvelope, LogEvidenceProfile, LogOutcome, LogSeverity, ProjectionDeltaOp,
     ProjectionDeltaOpKind, ProjectionPathSegment, SWARM_FRAME_VERSION, StoragePinIntent,
     SwarmFrame, SwarmFrameBody, SwarmFrameKind, SwarmProjectionDelta, SwarmProjectionSnapshot,
     SwarmRecordRef, ZoneScope, open_envelope, seal_envelope, sha256_hex, swarm_frame_id,
-    validate_projection_delta, validate_projection_snapshot, validate_storage_pin_intent,
-    validate_swarm_frame,
+    validate_log_evidence_profile, validate_projection_delta, validate_projection_snapshot,
+    validate_storage_pin_intent, validate_swarm_frame,
 };
 use reqwest::Client;
 use serde::Deserialize;
@@ -1101,6 +1105,7 @@ fn logging_dashboard_projection(
     } else {
         "not_configured"
     })?;
+    let evidence_profile = security_evidence_profile(state, now)?;
     let coverage = json!({
         "materializedCount": materialized_count,
         "targetCount": target_count,
@@ -1142,19 +1147,50 @@ fn logging_dashboard_projection(
             "storage": {
                 "status": health.storage_status,
                 "archiveContainerId": health.archive_container_id
-            }
+            },
+            "evidenceProfiles": [serde_json::to_value(evidence_profile).map_err(anyhow::Error::from)?]
         },
         "safeFacts": {
             "critical": critical_count,
             "error": error_count,
             "warning": warning_count,
             "info": info_count,
-            "targetCount": target_count
+            "targetCount": target_count,
+            "securityEvidenceProfiles": 1
         },
         "encryptedDetailRefs": [],
         "diagnostics": []
     });
     attach_projection_delta(projection, base_revision, now)
+}
+
+fn security_evidence_profile(state: &ApiState, now: u64) -> Result<LogEvidenceProfile, ApiError> {
+    let profile = LogEvidenceProfile {
+        kind: Some(LOG_EVIDENCE_PROFILE_KIND.to_string()),
+        profile_id: "logging.security.default".to_string(),
+        consumer_ref: "constitute-security".to_string(),
+        event_classes: vec![
+            LOG_EVIDENCE_PROFILE_EVENT_SECURITY_AUDIT.to_string(),
+            LOG_EVIDENCE_PROFILE_EVENT_RUNTIME_DIAGNOSTIC.to_string(),
+            LOG_EVIDENCE_PROFILE_EVENT_SERVICE_EVENT.to_string(),
+            LOG_EVIDENCE_PROFILE_EVENT_STORAGE_ACCESS.to_string(),
+            LOG_EVIDENCE_PROFILE_EVENT_MEDIA_PATH.to_string(),
+        ],
+        retention_window: "90d".to_string(),
+        safe_index_refs: vec![
+            "logging.events.safeIndex".to_string(),
+            "logging.dashboard.securitySummary".to_string(),
+        ],
+        detail_custody: LOG_EVIDENCE_DETAIL_CUSTODY_ENCRYPTED_DETAIL_REF.to_string(),
+        encrypted_detail_required: true,
+        access_grant_refs: vec!["grant:logging.security.default".to_string()],
+        storage_container_refs: vec![state.engine.archive_container_id()],
+        materialization_budget_ref: Some("logging.security.default.90d".to_string()),
+        issued_at: now,
+        expires_at: Some(now + 90 * 24 * 60 * 60),
+    };
+    validate_log_evidence_profile(&profile).map_err(anyhow::Error::from)?;
+    Ok(profile)
 }
 
 fn projection_base_revision(payload: &Value) -> u64 {
@@ -2902,6 +2938,15 @@ mod tests {
             1
         );
         assert_eq!(projection["payload"]["storage"]["status"], "not_configured");
+        let profile = &projection["payload"]["evidenceProfiles"][0];
+        assert_eq!(profile["kind"], "logging.evidence.profile");
+        assert_eq!(profile["consumerRef"], "constitute-security");
+        assert_eq!(profile["detailCustody"], "encryptedDetailRef");
+        assert_eq!(
+            profile["storageContainerRefs"][0],
+            state.engine.archive_container_id()
+        );
+        assert_eq!(projection["safeFacts"]["securityEvidenceProfiles"], 1);
     }
 
     #[test]
