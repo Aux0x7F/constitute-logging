@@ -108,6 +108,8 @@ pub struct StorageMaterializedIndexEntry {
     pub facts: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail_ref: Option<EncryptedDetailRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub encrypted_detail_refs: Vec<EncryptedDetailRef>,
     pub created_at: u64,
 }
 
