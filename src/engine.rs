@@ -501,6 +501,7 @@ mod tests {
             tags: vec!["gateway-access".to_string()],
             safe_facts: json!({ "service": service, "operation": "request" }),
             detail_ref: None,
+            encrypted_detail_refs: Vec::new(),
             redaction: vec![LogRedactionClass::Safe],
         };
         event.event_id = log_event_id(&event).expect("event id");

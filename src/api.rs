@@ -5,18 +5,19 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use constitute_protocol::{
-    CAPABILITY_PROJECTION_DELTA_APPLY, CAPABILITY_PROJECTION_OBSERVE, CaacEnvelope, LogCategory,
-    LogEventEnvelope, LogOutcome, LogSeverity, ProjectionDeltaOp, ProjectionDeltaOpKind,
-    ProjectionPathSegment, SWARM_FRAME_VERSION, StoragePinIntent, SwarmFrame, SwarmFrameBody,
-    SwarmFrameKind, SwarmProjectionDelta, SwarmProjectionSnapshot, SwarmRecordRef, ZoneScope,
-    open_envelope, seal_envelope, sha256_hex, swarm_frame_id, validate_projection_delta,
-    validate_projection_snapshot, validate_storage_pin_intent, validate_swarm_frame,
+    CAPABILITY_PROJECTION_DELTA_APPLY, CAPABILITY_PROJECTION_OBSERVE, CaacEnvelope,
+    EncryptedDetailRef, LogCategory, LogEventEnvelope, LogOutcome, LogSeverity, ProjectionDeltaOp,
+    ProjectionDeltaOpKind, ProjectionPathSegment, SWARM_FRAME_VERSION, StoragePinIntent,
+    SwarmFrame, SwarmFrameBody, SwarmFrameKind, SwarmProjectionDelta, SwarmProjectionSnapshot,
+    SwarmRecordRef, ZoneScope, open_envelope, seal_envelope, sha256_hex, swarm_frame_id,
+    validate_projection_delta, validate_projection_snapshot, validate_storage_pin_intent,
+    validate_swarm_frame,
 };
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
@@ -220,10 +221,7 @@ async fn ingest_edge_frame_at(
         events: vec![event.clone()],
     };
     let ingest = state.engine.ingest_events(&producer_id, request)?;
-    let archive_pin_intents = archive_pin_intent_for_event(state, &event)
-        .map_err(ApiError)?
-        .into_iter()
-        .collect::<Vec<_>>();
+    let archive_pin_intents = archive_pin_intents_for_event(state, &event).map_err(ApiError)?;
     let request_id = frame
         .correlation_id
         .clone()
@@ -268,10 +266,16 @@ fn logging_event_record_from_payload(payload: &Value) -> Value {
                 return event.clone();
             }
         }
-        if let Some(record) = inner.get("record").filter(|value| looks_like_logging_event(value)) {
+        if let Some(record) = inner
+            .get("record")
+            .filter(|value| looks_like_logging_event(value))
+        {
             return record.clone();
         }
-        if let Some(event) = inner.get("event").filter(|value| looks_like_logging_event(value)) {
+        if let Some(event) = inner
+            .get("event")
+            .filter(|value| looks_like_logging_event(value))
+        {
             return event.clone();
         }
     }
@@ -414,11 +418,7 @@ pub async fn process_gateway_frame(
 fn is_route_observation_frame(frame: &SwarmFrame) -> bool {
     frame.kind == SwarmFrameKind::RecordPublish
         && frame.channel_id.as_deref() == Some("swarm.route")
-        && frame
-            .record_ref
-            .as_ref()
-            .map(|record| record.kind.as_str())
-            == Some("route.observation")
+        && frame.record_ref.as_ref().map(|record| record.kind.as_str()) == Some("route.observation")
 }
 
 fn projection_delta_response_frame(
@@ -1868,15 +1868,17 @@ fn storage_materialize_request_for_events(
                 "outcome": enum_value(&event.outcome),
                 "safeFacts": event.safe_facts,
             }),
-            detail_ref: event.detail_ref.clone(),
+            detail_ref: event
+                .detail_ref
+                .clone()
+                .or_else(|| event.encrypted_detail_refs.first().cloned()),
+            encrypted_detail_refs: encrypted_detail_refs_for_event(event),
             created_at: event.occurred_at,
         })
         .collect::<Vec<_>>();
     let mut pin_intents = Vec::new();
     for event in events {
-        if let Some(intent) = archive_pin_intent_for_event(state, event)? {
-            pin_intents.push(intent);
-        }
+        pin_intents.extend(archive_pin_intents_for_event(state, event)?);
     }
     Ok(StorageMaterializeRequest {
         entries,
@@ -1884,13 +1886,44 @@ fn storage_materialize_request_for_events(
     })
 }
 
-fn archive_pin_intent_for_event(
+fn encrypted_detail_refs_for_event(
+    event: &constitute_protocol::LogEventEnvelope,
+) -> Vec<EncryptedDetailRef> {
+    let mut refs = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push_ref = |detail_ref: &EncryptedDetailRef| {
+        let key = format!(
+            "{}|{}|{}",
+            detail_ref.object_id, detail_ref.container_id, detail_ref.manifest_hash
+        );
+        if seen.insert(key) {
+            refs.push(detail_ref.clone());
+        }
+    };
+    if let Some(detail_ref) = &event.detail_ref {
+        push_ref(detail_ref);
+    }
+    for detail_ref in &event.encrypted_detail_refs {
+        push_ref(detail_ref);
+    }
+    refs
+}
+
+fn archive_pin_intents_for_event(
     state: &ApiState,
     event: &constitute_protocol::LogEventEnvelope,
-) -> anyhow::Result<Option<StoragePinIntent>> {
-    let Some(detail_ref) = &event.detail_ref else {
-        return Ok(None);
-    };
+) -> anyhow::Result<Vec<StoragePinIntent>> {
+    encrypted_detail_refs_for_event(event)
+        .iter()
+        .map(|detail_ref| archive_pin_intent_for_detail_ref(state, event, detail_ref))
+        .collect()
+}
+
+fn archive_pin_intent_for_detail_ref(
+    state: &ApiState,
+    event: &constitute_protocol::LogEventEnvelope,
+    detail_ref: &EncryptedDetailRef,
+) -> anyhow::Result<StoragePinIntent> {
     let retention = archive_retention_for_event(event);
     let intent = StoragePinIntent {
         intent_id: format!(
@@ -1912,7 +1945,7 @@ fn archive_pin_intent_for_event(
         expires_at: archive_pin_expires_at(event),
     };
     validate_storage_pin_intent(&intent)?;
-    Ok(Some(intent))
+    Ok(intent)
 }
 
 fn archive_retention_for_event(event: &constitute_protocol::LogEventEnvelope) -> String {
@@ -1952,8 +1985,8 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use constitute_protocol::{
-        EncryptedDetailRef, LOG_SCHEMA_VERSION, LogCategory, LogOutcome, LogProducerRef,
-        LogCorrelationRef, LogRedactionClass, LogSeverity, LogSubjectRef, SWARM_FRAME_VERSION,
+        EncryptedDetailRef, LOG_SCHEMA_VERSION, LogCategory, LogCorrelationRef, LogOutcome,
+        LogProducerRef, LogRedactionClass, LogSeverity, LogSubjectRef, SWARM_FRAME_VERSION,
         StoragePinProjectionStatus, SwarmFrame, SwarmFrameBody, SwarmFrameKind, SwarmRecordRef,
         ZoneScope, log_event_id, pubkey_from_sk_hex, storage_pin_projection_from_records,
         swarm_frame_id,
@@ -1986,6 +2019,7 @@ mod tests {
             tags: vec!["projection-test".to_string()],
             safe_facts: json!({ "subject": subject, "occurredAt": occurred_at }),
             detail_ref: None,
+            encrypted_detail_refs: Vec::new(),
             redaction: vec![LogRedactionClass::Safe],
         };
         event.event_id = log_event_id(&event).expect("event id");
@@ -2472,13 +2506,20 @@ mod tests {
             manifest_hash: "sha256:edge-detail-manifest".to_string(),
             summary_tags: vec!["logging".to_string(), "archive".to_string()],
         });
+        event.encrypted_detail_refs = vec![EncryptedDetailRef {
+            object_id: "object-encrypted-detail-secondary".to_string(),
+            container_id: "gateway-logs".to_string(),
+            key_ref: "gateway-logs:key-secondary".to_string(),
+            manifest_hash: "sha256:edge-detail-secondary-manifest".to_string(),
+            summary_tags: vec!["logging".to_string(), "debug-detail".to_string()],
+        }];
         event.event_id = log_event_id(&event).expect("event id");
         let frame = logging_event_frame(event);
         let emitted = process_gateway_frame(&state.state, frame, 1_700_000_000_000)
             .await
             .expect("stream frame");
 
-        assert_eq!(emitted.len(), 2);
+        assert_eq!(emitted.len(), 3);
         assert_eq!(emitted[0].kind, SwarmFrameKind::ProjectionDelta);
         assert_eq!(emitted[1].kind, SwarmFrameKind::StoragePinIntent);
         assert_eq!(emitted[1].channel_id.as_deref(), Some("storage.pin.intent"));
@@ -2490,6 +2531,9 @@ mod tests {
             Some("storage.pin.intent")
         );
         validate_swarm_frame(&emitted[1], 1_700_000_000_001).expect("valid storage pin frame");
+        assert_eq!(emitted[2].kind, SwarmFrameKind::StoragePinIntent);
+        validate_swarm_frame(&emitted[2], 1_700_000_000_001)
+            .expect("valid secondary storage pin frame");
     }
 
     #[tokio::test]
@@ -2871,15 +2915,33 @@ mod tests {
             manifest_hash: "sha256:encrypted-detail-manifest".to_string(),
             summary_tags: vec!["logging".to_string(), "archive".to_string()],
         });
+        event.encrypted_detail_refs = vec![EncryptedDetailRef {
+            object_id: "object-encrypted-detail-2".to_string(),
+            container_id: "gateway-logs".to_string(),
+            key_ref: "gateway-logs:key-secondary".to_string(),
+            manifest_hash: "sha256:encrypted-detail-manifest-2".to_string(),
+            summary_tags: vec!["logging".to_string(), "debug-detail".to_string()],
+        }];
         event.event_id = log_event_id(&event).expect("event id");
         let request =
             storage_materialize_request_for_events(&state, "gateway", &[event]).expect("request");
         assert_eq!(request.entries.len(), 1);
-        assert_eq!(request.pin_intents.len(), 1);
+        assert_eq!(request.entries[0].encrypted_detail_refs.len(), 2);
+        assert_eq!(request.pin_intents.len(), 2);
         let intent = &request.pin_intents[0];
         validate_storage_pin_intent(intent).expect("valid pin intent");
         assert_eq!(intent.object_refs, vec!["object-encrypted-detail-1"]);
         assert_eq!(intent.manifest_hash, "sha256:encrypted-detail-manifest");
+        let secondary_intent = &request.pin_intents[1];
+        validate_storage_pin_intent(secondary_intent).expect("valid secondary pin intent");
+        assert_eq!(
+            secondary_intent.object_refs,
+            vec!["object-encrypted-detail-2"]
+        );
+        assert_eq!(
+            secondary_intent.manifest_hash,
+            "sha256:encrypted-detail-manifest-2"
+        );
         let pin_projection = storage_pin_projection_from_records(intent, &[], 1_700_000_000)
             .expect("pin projection");
         assert_eq!(pin_projection.status, StoragePinProjectionStatus::Pending);
