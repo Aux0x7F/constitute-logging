@@ -1,4 +1,4 @@
-use constitute_protocol::{EncryptedDetailRef, LogEventEnvelope};
+use constitute_protocol::{EncryptedDetailRef, LogEventEnvelope, StoragePinIntent};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -115,4 +115,6 @@ pub struct StorageMaterializedIndexEntry {
 #[serde(rename_all = "camelCase")]
 pub struct StorageMaterializeRequest {
     pub entries: Vec<StorageMaterializedIndexEntry>,
+    #[serde(default)]
+    pub pin_intents: Vec<StoragePinIntent>,
 }

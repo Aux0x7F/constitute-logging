@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow};
 use constitute_protocol::{LogEventEnvelope, validate_log_event};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::Value;
 use tokio::sync::broadcast;
 
 use crate::types::{
@@ -142,7 +143,7 @@ impl LoggingEngine {
             )
             .optional()?
             .ok_or_else(|| anyhow!("log event not found"))?;
-        Ok(serde_json::from_str(&event_json)?)
+        parse_stored_event(&event_json)
     }
 
     pub fn search(&self, query: EventSearchQuery) -> Result<EventSearchResponse> {
@@ -152,7 +153,7 @@ impl LoggingEngine {
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut events = Vec::new();
         for row in rows {
-            let event: LogEventEnvelope = serde_json::from_str(&row?)?;
+            let event = parse_stored_event(&row?)?;
             if matches_query(&event, &query) {
                 events.push(event);
                 if events.len() >= limit {
@@ -176,7 +177,7 @@ impl LoggingEngine {
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut count = 0u64;
         for row in rows {
-            let event: LogEventEnvelope = serde_json::from_str(&row?)?;
+            let event = parse_stored_event(&row?)?;
             if matches_query(&event, &query) && include(&event) {
                 count += 1;
             }
@@ -403,11 +404,62 @@ fn count_table(db: &Connection, table: &str) -> Result<u64> {
     Ok(db.query_row(&sql, [], |row| row.get::<_, u64>(0))?)
 }
 
+fn parse_stored_event(raw: &str) -> Result<LogEventEnvelope> {
+    match serde_json::from_str(raw) {
+        Ok(event) => Ok(event),
+        Err(original_err) => {
+            let original_error = original_err.to_string();
+            let mut value: Value = serde_json::from_str(raw)
+                .with_context(|| format!("parse stored log event json after {original_error}"))?;
+            if !normalize_legacy_stored_event(&mut value) {
+                return Err(anyhow!(original_error)).context("parse stored log event");
+            }
+            serde_json::from_value(value).context("parse normalized stored log event")
+        }
+    }
+}
+
+fn normalize_legacy_stored_event(value: &mut Value) -> bool {
+    let Some(root) = value.as_object_mut() else {
+        return false;
+    };
+    let Some(category) = root
+        .get("category")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+    else {
+        return false;
+    };
+    let normalized = match category.as_str() {
+        "serviceAccess" | "serviceSignal" => "gatewayControl",
+        _ => return false,
+    };
+    root.insert(
+        "category".to_string(),
+        Value::String(normalized.to_string()),
+    );
+    let safe_facts = root
+        .entry("safeFacts".to_string())
+        .or_insert_with(|| Value::Object(Default::default()));
+    if let Value::Object(map) = safe_facts {
+        map.entry("legacyCategory".to_string())
+            .or_insert_with(|| Value::String(category));
+    }
+    true
+}
+
 pub fn now_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+pub fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 #[cfg(test)]
@@ -432,7 +484,7 @@ mod tests {
                 gateway_pk: None,
                 service_pk: None,
             },
-            category: LogCategory::ServiceAccess,
+            category: LogCategory::GatewayControl,
             severity: LogSeverity::Info,
             outcome: LogOutcome::Succeeded,
             subject: Some(LogSubjectRef {
@@ -446,7 +498,7 @@ mod tests {
                 causation_id: None,
                 trace_id: None,
             }),
-            tags: vec!["service-access".to_string()],
+            tags: vec!["gateway-access".to_string()],
             safe_facts: json!({ "service": service, "operation": "request" }),
             detail_ref: None,
             redaction: vec![LogRedactionClass::Safe],
@@ -480,11 +532,74 @@ mod tests {
         let found = engine
             .search(EventSearchQuery {
                 service: Some("gateway".to_string()),
-                tag: Some("service-access".to_string()),
+                tag: Some("gateway-access".to_string()),
                 ..Default::default()
             })
             .expect("search");
         assert_eq!(found.events.len(), 1);
+    }
+
+    #[test]
+    fn legacy_service_access_and_signal_events_are_normalized_at_storage_boundary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = LoggingEngine::open(dir.path(), "gateway-logs").expect("engine");
+        let db = Connection::open(dir.path().join("logging.sqlite3")).expect("db");
+        for legacy_category in ["serviceAccess", "serviceSignal"] {
+            let mut event = event("gateway");
+            event.event_id = format!("legacy-{legacy_category}");
+            let mut raw = serde_json::to_value(&event).expect("event json");
+            raw["category"] = json!(legacy_category);
+            db.execute(
+                r#"
+                insert into events (
+                    event_id, producer_id, occurred_at, received_at, service, component, category,
+                    severity, outcome, subject, resource, correlation_id, tags_json,
+                    safe_facts_json, detail_ref_json, event_json
+                ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                "#,
+                params![
+                    event.event_id,
+                    "gateway",
+                    event.occurred_at as i64,
+                    event.received_at.unwrap_or(event.occurred_at) as i64,
+                    "gateway",
+                    "managed",
+                    legacy_category,
+                    enum_value(&event.severity),
+                    enum_value(&event.outcome),
+                    "",
+                    "",
+                    "",
+                    "[]",
+                    "{}",
+                    "[]",
+                    serde_json::to_string(&raw).expect("raw event"),
+                ],
+            )
+            .expect("insert legacy event");
+        }
+
+        let access = engine
+            .get_event("legacy-serviceAccess")
+            .expect("get access");
+        assert_eq!(access.category, LogCategory::GatewayControl);
+        assert_eq!(access.safe_facts["legacyCategory"], "serviceAccess");
+        let signal = engine
+            .get_event("legacy-serviceSignal")
+            .expect("get signal");
+        assert_eq!(signal.category, LogCategory::GatewayControl);
+        assert_eq!(signal.safe_facts["legacyCategory"], "serviceSignal");
+        assert_eq!(
+            engine
+                .search(EventSearchQuery {
+                    category: Some("gatewayControl".to_string()),
+                    ..Default::default()
+                })
+                .expect("search")
+                .events
+                .len(),
+            2
+        );
     }
 
     #[test]
