@@ -5,17 +5,19 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use constitute_protocol::{
-    CAPABILITY_PROJECTION_DELTA_APPLY, CAPABILITY_PROJECTION_OBSERVE, CaacEnvelope,
+    CAPABILITY_PROJECTION_DELTA_APPLY, CAPABILITY_PROJECTION_OBSERVE, CaacEnvelope, ConsumerFloor,
     EncryptedDetailRef, LOG_EVIDENCE_DETAIL_CUSTODY_ENCRYPTED_DETAIL_REF,
     LOG_EVIDENCE_PROFILE_EVENT_MEDIA_PATH, LOG_EVIDENCE_PROFILE_EVENT_RUNTIME_DIAGNOSTIC,
     LOG_EVIDENCE_PROFILE_EVENT_SECURITY_AUDIT, LOG_EVIDENCE_PROFILE_EVENT_SERVICE_EVENT,
     LOG_EVIDENCE_PROFILE_EVENT_STORAGE_ACCESS, LOG_EVIDENCE_PROFILE_KIND, LogCategory,
-    LogEventEnvelope, LogEvidenceProfile, LogOutcome, LogSeverity, ProjectionDeltaOp,
-    ProjectionDeltaOpKind, ProjectionPathSegment, SWARM_FRAME_VERSION, StoragePinIntent,
+    LogEventEnvelope, LogEvidenceProfile, LogOutcome, LogSeverity, MaterializationBudget,
+    MaterializationSchemaPosture, ProjectionDeltaOp, ProjectionDeltaOpKind, ProjectionPathSegment,
+    RECORD_CONSUMER_FLOOR, RECORD_MATERIALIZATION_BUDGET, SWARM_FRAME_VERSION, StoragePinIntent,
     SwarmFrame, SwarmFrameBody, SwarmFrameKind, SwarmProjectionDelta, SwarmProjectionSnapshot,
     SwarmRecordRef, ZoneScope, open_envelope, seal_envelope, sha256_hex, swarm_frame_id,
-    validate_log_evidence_profile, validate_projection_delta, validate_projection_snapshot,
-    validate_storage_pin_intent, validate_swarm_frame,
+    validate_consumer_floor, validate_log_evidence_profile, validate_materialization_budget,
+    validate_projection_delta, validate_projection_snapshot, validate_storage_pin_intent,
+    validate_swarm_frame,
 };
 use reqwest::Client;
 use serde::Deserialize;
@@ -955,7 +957,7 @@ fn logging_events_projection(
         .min();
     let newest_observed = policy_event_refs
         .iter()
-        .map(|event| event.occurred_at)
+        .map(|event| event.received_at.unwrap_or(event.occurred_at))
         .max();
     let completion_ratio = completion_ratio(materialized_count, target_count);
     let sync_state = if completion_ratio >= 1.0 {
@@ -967,6 +969,24 @@ fn logging_events_projection(
         .first()
         .map(|(_, event)| event.event_id.clone())
         .unwrap_or_else(|| format!("empty-{now}"));
+    let replay_posture = logging_projection_replay_posture(
+        state,
+        "logging.events",
+        &policy_event_refs,
+        materialized_count,
+        target_count,
+        limit as u64,
+        now,
+    )?;
+    let materialization_budget = logging_projection_materialization_budget(
+        state,
+        "logging.events",
+        &replay_posture,
+        materialized_count,
+        target_count,
+        limit as u64,
+        now,
+    )?;
     let projection = json!({
         "requestId": request_id,
         "channelId": "logging.events",
@@ -998,13 +1018,19 @@ fn logging_events_projection(
                 "oldestObservedAt": oldest_observed,
                 "newestObservedAt": newest_observed,
                 "syncState": sync_state
-            }
+            },
+            "replayPosture": replay_posture,
+            "materializationBudget": materialization_budget
         },
+        "replayPosture": replay_posture,
+        "materializationBudget": materialization_budget,
         "safeFacts": {
             "eventCount": materialized_count,
             "targetCount": target_count,
             "completionRatio": completion_ratio,
-            "syncState": sync_state
+            "syncState": sync_state,
+            "replayState": replay_posture.get("state").cloned().unwrap_or_else(|| json!("unknown")),
+            "privacyTier": "safeProjection"
         },
         "encryptedDetailRefs": [],
         "diagnostics": []
@@ -1106,6 +1132,25 @@ fn logging_dashboard_projection(
         "not_configured"
     })?;
     let evidence_profile = security_evidence_profile(state, now)?;
+    let security_budget = logging_security_evidence_materialization_budget(state, now)?;
+    let replay_posture = logging_projection_replay_posture(
+        state,
+        "logging.dashboard",
+        &policy_event_refs,
+        materialized_count,
+        target_count,
+        5000,
+        now,
+    )?;
+    let materialization_budget = logging_projection_materialization_budget(
+        state,
+        "logging.dashboard",
+        &replay_posture,
+        materialized_count,
+        target_count,
+        5000,
+        now,
+    )?;
     let coverage = json!({
         "materializedCount": materialized_count,
         "targetCount": target_count,
@@ -1148,20 +1193,293 @@ fn logging_dashboard_projection(
                 "status": health.storage_status,
                 "archiveContainerId": health.archive_container_id
             },
-            "evidenceProfiles": [serde_json::to_value(evidence_profile).map_err(anyhow::Error::from)?]
+            "evidenceProfiles": [serde_json::to_value(evidence_profile).map_err(anyhow::Error::from)?],
+            "evidenceMaterializationBudgets": [serde_json::to_value(security_budget).map_err(anyhow::Error::from)?],
+            "replayPosture": replay_posture,
+            "materializationBudget": materialization_budget
         },
+        "replayPosture": replay_posture,
+        "materializationBudget": materialization_budget,
         "safeFacts": {
             "critical": critical_count,
             "error": error_count,
             "warning": warning_count,
             "info": info_count,
             "targetCount": target_count,
-            "securityEvidenceProfiles": 1
+            "securityEvidenceProfiles": 1,
+            "securityMaterializationBudgets": 1,
+            "replayState": replay_posture.get("state").cloned().unwrap_or_else(|| json!("unknown"))
         },
         "encryptedDetailRefs": [],
         "diagnostics": []
     });
     attach_projection_delta(projection, base_revision, now)
+}
+
+fn logging_projection_consumer_floor(
+    channel_id: &str,
+    source_events: &[&LogEventEnvelope],
+    materialized_count: u64,
+    target_count: u64,
+    materialization_id: &str,
+    now: u64,
+) -> Result<ConsumerFloor, ApiError> {
+    let lagging = target_count > materialized_count;
+    let cursor = source_events
+        .first()
+        .map(|event| event.event_id.clone())
+        .unwrap_or_else(|| format!("empty-{channel_id}-{now}"));
+    let event_time_floor = source_events.iter().map(|event| event.occurred_at).min();
+    let observed_time_floor = source_events
+        .iter()
+        .map(|event| event.received_at.unwrap_or(event.occurred_at))
+        .max()
+        .or(event_time_floor);
+    let floor = ConsumerFloor {
+        kind: Some(RECORD_CONSUMER_FLOOR.to_string()),
+        floor_id: format!("floor:{materialization_id}"),
+        consumer_ref: "runtime.projection.store".to_string(),
+        subscription_id: None,
+        materialization_id: Some(materialization_id.to_string()),
+        subject_ref: Some(channel_id.to_string()),
+        cursor: Some(cursor),
+        ack_floor: Some(materialized_count.to_string()),
+        witness_floor: Some(target_count.to_string()),
+        compaction_floor: Some(target_count.saturating_sub(materialized_count).to_string()),
+        event_time_floor,
+        observed_time_floor,
+        lag_state: if lagging { "lagging" } else { "caughtUp" }.to_string(),
+        reason: lagging
+            .then(|| "materialized projection is behind available event evidence".to_string()),
+        redelivery: json!({ "mode": "projection-repair", "duplicatePolicy": "eventId" }),
+        replay: json!({ "mode": "boundedProjection", "channelId": channel_id }),
+        evidence_refs: Vec::new(),
+        sampled_at: now,
+        expires_at: Some(now + 60),
+    };
+    validate_consumer_floor(&floor).map_err(anyhow::Error::from)?;
+    Ok(floor)
+}
+
+fn logging_projection_replay_posture(
+    state: &ApiState,
+    channel_id: &str,
+    source_events: &[&LogEventEnvelope],
+    materialized_count: u64,
+    target_count: u64,
+    limit: u64,
+    now: u64,
+) -> Result<Value, ApiError> {
+    let materialization_id = format!("logging.service.{channel_id}.projection");
+    let floor = logging_projection_consumer_floor(
+        channel_id,
+        source_events,
+        materialized_count,
+        target_count,
+        &materialization_id,
+        now,
+    )?;
+    let safe_fact_key_count = source_events
+        .iter()
+        .flat_map(|event| {
+            event
+                .safe_facts
+                .as_object()
+                .map(|map| map.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        })
+        .collect::<HashSet<_>>()
+        .len() as u64;
+    let label_value_count = source_events
+        .iter()
+        .flat_map(|event| event.tags.iter().cloned())
+        .collect::<HashSet<_>>()
+        .len() as u64;
+    let schema_versions = source_events
+        .iter()
+        .map(|event| event.schema_version.to_string())
+        .collect::<HashSet<_>>();
+    let encrypted_refs = source_events
+        .iter()
+        .map(|event| {
+            event.encrypted_detail_refs.len() as u64 + u64::from(event.detail_ref.is_some())
+        })
+        .sum::<u64>();
+    let pressure = target_count > limit || safe_fact_key_count > 64 || label_value_count > 250;
+    Ok(json!({
+        "state": if target_count > materialized_count { "lagging" } else { "caughtUp" },
+        "sourceAuthority": format!("service:logging:{}", state.service_identity.service_pk),
+        "consumerFloor": floor,
+        "bitemporal": {
+            "eventTimeFloor": floor.event_time_floor,
+            "observedTimeFloor": floor.observed_time_floor
+        },
+        "schema": {
+            "state": if schema_versions.len() <= 1 { "current" } else { "compatible" },
+            "versions": schema_versions.into_iter().collect::<Vec<_>>()
+        },
+        "cardinality": {
+            "state": if pressure { "pressure" } else { "withinBudget" },
+            "sourceCount": source_events.len(),
+            "materializedCount": materialized_count,
+            "targetCount": target_count,
+            "safeFactKeyCount": safe_fact_key_count,
+            "labelValueCount": label_value_count,
+            "highCardinalityOverflow": "encryptedDetailRef"
+        },
+        "privacy": {
+            "tiers": ["safeFacts", "safeProjection", "encryptedDetail"],
+            "encryptedDetailRefs": encrypted_refs,
+            "safeFactsOnly": false
+        },
+        "sampling": {
+            "state": if pressure { "adaptive" } else { "fullWithinWindow" },
+            "limit": limit,
+            "policy": "severityThenTime"
+        }
+    }))
+}
+
+fn logging_projection_materialization_budget(
+    state: &ApiState,
+    channel_id: &str,
+    replay_posture: &Value,
+    materialized_count: u64,
+    target_count: u64,
+    limit: u64,
+    now: u64,
+) -> Result<MaterializationBudget, ApiError> {
+    let materialization_id = format!("logging.service.{channel_id}.projection");
+    let pressure = replay_posture
+        .get("cardinality")
+        .and_then(|cardinality| cardinality.get("state"))
+        .and_then(Value::as_str)
+        == Some("pressure");
+    let floor: ConsumerFloor = serde_json::from_value(
+        replay_posture
+            .get("consumerFloor")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+    )
+    .map_err(anyhow::Error::from)?;
+    let budget = MaterializationBudget {
+        kind: Some(RECORD_MATERIALIZATION_BUDGET.to_string()),
+        budget_id: materialization_id,
+        source_authority: format!("service:logging:{}", state.service_identity.service_pk),
+        consumer_ref: "runtime.projection.store".to_string(),
+        subscriber_ref: None,
+        payload_class: "projection".to_string(),
+        copy_role: "projection".to_string(),
+        transfer_mode: "clone".to_string(),
+        privacy_tier: Some("safeProjection".to_string()),
+        state: if pressure { "pressure" } else { "withinBudget" }.to_string(),
+        limits: json!({
+            "channelId": channel_id,
+            "materializedCount": materialized_count,
+            "targetCount": target_count,
+            "maxEvents": limit,
+            "maxSafeFactKeys": 64,
+            "maxLabelValues": 250
+        }),
+        snapshot_policy: json!({ "mode": "safeProjection", "owner": "logging.service" }),
+        delta_policy: json!({ "mode": "projection.delta", "baseRevision": "required" }),
+        coalescing: json!({ "key": "eventId", "duplicatePolicy": "replaceLatest" }),
+        cardinality: replay_posture
+            .get("cardinality")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+        schema: Some(MaterializationSchemaPosture {
+            state: replay_posture
+                .get("schema")
+                .and_then(|schema| schema.get("state"))
+                .and_then(Value::as_str)
+                .unwrap_or("current")
+                .to_string(),
+            version: Some("constitute.logging.projection.v1".to_string()),
+            reason: None,
+            migration_refs: Vec::new(),
+        }),
+        consumer_floor: Some(floor),
+        reference_refs: Vec::new(),
+        blocked_reasons: if pressure {
+            vec!["loggingProjectionMaterializationPressure".to_string()]
+        } else {
+            Vec::new()
+        },
+        evidence_refs: Vec::new(),
+        retention_class: Some("ephemeral.logging-projection".to_string()),
+        issued_at: now,
+        release_after: Some(now + 60),
+        expires_at: Some(now + 5 * 60),
+    };
+    validate_materialization_budget(&budget).map_err(anyhow::Error::from)?;
+    Ok(budget)
+}
+
+fn logging_security_evidence_materialization_budget(
+    state: &ApiState,
+    now: u64,
+) -> Result<MaterializationBudget, ApiError> {
+    let materialization_id = "logging.security.default.90d".to_string();
+    let floor = ConsumerFloor {
+        kind: Some(RECORD_CONSUMER_FLOOR.to_string()),
+        floor_id: format!("floor:{materialization_id}"),
+        consumer_ref: "constitute-security".to_string(),
+        subscription_id: None,
+        materialization_id: Some(materialization_id.clone()),
+        subject_ref: Some("logging.events.encryptedDetail".to_string()),
+        cursor: Some(state.engine.archive_container_id()),
+        ack_floor: Some("storage-container-ref".to_string()),
+        witness_floor: Some("security-profile".to_string()),
+        compaction_floor: Some("retention-window:90d".to_string()),
+        event_time_floor: None,
+        observed_time_floor: Some(now),
+        lag_state: "unknown".to_string(),
+        reason: None,
+        redelivery: json!({ "mode": "authorized-read", "duplicatePolicy": "objectRef" }),
+        replay: json!({ "mode": "security-query", "retentionWindow": "90d" }),
+        evidence_refs: vec!["logging.security.default".to_string()],
+        sampled_at: now,
+        expires_at: Some(now + 24 * 60 * 60),
+    };
+    validate_consumer_floor(&floor).map_err(anyhow::Error::from)?;
+    let budget = MaterializationBudget {
+        kind: Some(RECORD_MATERIALIZATION_BUDGET.to_string()),
+        budget_id: materialization_id,
+        source_authority: format!("service:logging:{}", state.service_identity.service_pk),
+        consumer_ref: "constitute-security".to_string(),
+        subscriber_ref: None,
+        payload_class: "retainedRaw".to_string(),
+        copy_role: "retention".to_string(),
+        transfer_mode: "referenceOnly".to_string(),
+        privacy_tier: Some("encryptedDetail".to_string()),
+        state: "withinBudget".to_string(),
+        limits: json!({
+            "retentionWindow": "90d",
+            "detailCustody": "encryptedDetailRef",
+            "safeIndexRefs": ["logging.events.safeIndex", "logging.dashboard.securitySummary"]
+        }),
+        snapshot_policy: json!({ "mode": "encrypted-detail-refs-only" }),
+        delta_policy: json!({ "mode": "storage-pin-intent" }),
+        coalescing: json!({ "key": "encryptedDetailRef" }),
+        cardinality: json!({ "rawDetail": "byObjectRef", "safeFacts": "indexedSummary" }),
+        schema: Some(MaterializationSchemaPosture {
+            state: "current".to_string(),
+            version: Some("logging.security.evidence.v1".to_string()),
+            reason: None,
+            migration_refs: Vec::new(),
+        }),
+        consumer_floor: Some(floor),
+        reference_refs: vec![state.engine.archive_container_id()],
+        blocked_reasons: Vec::new(),
+        evidence_refs: vec!["logging.security.default".to_string()],
+        retention_class: Some("long.security-evidence".to_string()),
+        issued_at: now,
+        release_after: Some(now + 90 * 24 * 60 * 60),
+        expires_at: Some(now + 90 * 24 * 60 * 60),
+    };
+    validate_materialization_budget(&budget).map_err(anyhow::Error::from)?;
+    Ok(budget)
 }
 
 fn security_evidence_profile(state: &ApiState, now: u64) -> Result<LogEvidenceProfile, ApiError> {
@@ -2625,6 +2943,30 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(projection["safeFacts"]["eventCount"], 0);
+        assert_eq!(
+            projection["materializationBudget"]["kind"],
+            "materialization.budget"
+        );
+        assert_eq!(
+            projection["materializationBudget"]["payloadClass"],
+            "projection"
+        );
+        assert_eq!(
+            projection["materializationBudget"]["privacyTier"],
+            "safeProjection"
+        );
+        assert_eq!(
+            projection["materializationBudget"]["consumerFloor"]["kind"],
+            "consumer.floor"
+        );
+        assert_eq!(projection["replayPosture"]["schema"]["state"], "current");
+        assert_eq!(
+            projection["replayPosture"]["privacy"]["tiers"][2],
+            "encryptedDetail"
+        );
+        let budget: MaterializationBudget =
+            serde_json::from_value(projection["materializationBudget"].clone()).expect("budget");
+        validate_materialization_budget(&budget).expect("valid service projection budget");
     }
 
     #[test]
@@ -2947,6 +3289,28 @@ mod tests {
             state.engine.archive_container_id()
         );
         assert_eq!(projection["safeFacts"]["securityEvidenceProfiles"], 1);
+        assert_eq!(projection["safeFacts"]["securityMaterializationBudgets"], 1);
+        assert_eq!(
+            projection["materializationBudget"]["kind"],
+            "materialization.budget"
+        );
+        assert_eq!(
+            projection["replayPosture"]["consumerFloor"]["kind"],
+            "consumer.floor"
+        );
+        let budget: MaterializationBudget =
+            serde_json::from_value(projection["materializationBudget"].clone()).expect("budget");
+        validate_materialization_budget(&budget).expect("valid dashboard projection budget");
+        let security_budget: MaterializationBudget = serde_json::from_value(
+            projection["payload"]["evidenceMaterializationBudgets"][0].clone(),
+        )
+        .expect("security budget");
+        validate_materialization_budget(&security_budget).expect("valid security budget");
+        assert_eq!(security_budget.payload_class, "retainedRaw");
+        assert_eq!(
+            security_budget.privacy_tier.as_deref(),
+            Some("encryptedDetail")
+        );
     }
 
     #[test]
