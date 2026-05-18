@@ -5,19 +5,22 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use constitute_protocol::{
-    CAPABILITY_PROJECTION_DELTA_APPLY, CAPABILITY_PROJECTION_OBSERVE, CaacEnvelope, ConsumerFloor,
-    EncryptedDetailRef, LOG_EVIDENCE_DETAIL_CUSTODY_ENCRYPTED_DETAIL_REF,
+    AccessEpochRecord, AccessGroupRecord, CAPABILITY_PROJECTION_DELTA_APPLY,
+    CAPABILITY_PROJECTION_OBSERVE, CaacEnvelope, ConsumerFloor, EncryptedDetailRef,
+    EventFabricAccessClassRecord, LOG_EVIDENCE_DETAIL_CUSTODY_ENCRYPTED_DETAIL_REF,
     LOG_EVIDENCE_PROFILE_EVENT_MEDIA_PATH, LOG_EVIDENCE_PROFILE_EVENT_RUNTIME_DIAGNOSTIC,
     LOG_EVIDENCE_PROFILE_EVENT_SECURITY_AUDIT, LOG_EVIDENCE_PROFILE_EVENT_SERVICE_EVENT,
     LOG_EVIDENCE_PROFILE_EVENT_STORAGE_ACCESS, LOG_EVIDENCE_PROFILE_KIND, LogCategory,
     LogEventEnvelope, LogEvidenceProfile, LogOutcome, LogSeverity, MaterializationBudget,
     MaterializationSchemaPosture, ProjectionDeltaOp, ProjectionDeltaOpKind, ProjectionPathSegment,
-    RECORD_CONSUMER_FLOOR, RECORD_MATERIALIZATION_BUDGET, SWARM_FRAME_VERSION, StoragePinIntent,
-    SwarmFrame, SwarmFrameBody, SwarmFrameKind, SwarmProjectionDelta, SwarmProjectionSnapshot,
-    SwarmRecordRef, ZoneScope, open_envelope, seal_envelope, sha256_hex, swarm_frame_id,
-    validate_consumer_floor, validate_log_evidence_profile, validate_materialization_budget,
-    validate_projection_delta, validate_projection_snapshot, validate_storage_pin_intent,
-    validate_swarm_frame,
+    RECORD_ACCESS_EPOCH, RECORD_ACCESS_GROUP, RECORD_CONSUMER_FLOOR,
+    RECORD_EVENT_FABRIC_ACCESS_CLASS, RECORD_MATERIALIZATION_BUDGET, SWARM_FRAME_VERSION,
+    StoragePinIntent, SwarmFrame, SwarmFrameBody, SwarmFrameKind, SwarmProjectionDelta,
+    SwarmProjectionSnapshot, SwarmRecordRef, ZoneScope, open_envelope, seal_envelope, sha256_hex,
+    swarm_frame_id, validate_access_epoch, validate_access_group, validate_consumer_floor,
+    validate_event_fabric_access_class, validate_log_evidence_profile,
+    validate_materialization_budget, validate_projection_delta, validate_projection_snapshot,
+    validate_storage_pin_intent, validate_swarm_frame,
 };
 use reqwest::Client;
 use serde::Deserialize;
@@ -1133,6 +1136,9 @@ fn logging_dashboard_projection(
     })?;
     let evidence_profile = security_evidence_profile(state, now)?;
     let security_budget = logging_security_evidence_materialization_budget(state, now)?;
+    let security_access_group = logging_security_access_group(state, now)?;
+    let security_access_epoch = logging_security_access_epoch(state, now)?;
+    let event_fabric_access_classes = logging_event_fabric_access_classes(state, now)?;
     let replay_posture = logging_projection_replay_posture(
         state,
         "logging.dashboard",
@@ -1193,6 +1199,18 @@ fn logging_dashboard_projection(
                 "status": health.storage_status,
                 "archiveContainerId": health.archive_container_id
             },
+            "eventFabric": {
+                "accessGroups": [serde_json::to_value(security_access_group.clone()).map_err(anyhow::Error::from)?],
+                "accessEpochs": [serde_json::to_value(security_access_epoch.clone()).map_err(anyhow::Error::from)?],
+                "accessClasses": event_fabric_access_classes
+                    .iter()
+                    .map(serde_json::to_value)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(anyhow::Error::from)?,
+                "processorRoles": ["role:logging.processor", "role:security.processor"],
+                "contentClasses": security_access_group.content_classes,
+                "currentEpochId": security_access_epoch.epoch_id
+            },
             "evidenceProfiles": [serde_json::to_value(evidence_profile).map_err(anyhow::Error::from)?],
             "evidenceMaterializationBudgets": [serde_json::to_value(security_budget).map_err(anyhow::Error::from)?],
             "replayPosture": replay_posture,
@@ -1208,6 +1226,8 @@ fn logging_dashboard_projection(
             "targetCount": target_count,
             "securityEvidenceProfiles": 1,
             "securityMaterializationBudgets": 1,
+            "eventFabricAccessGroups": 1,
+            "eventFabricAccessClasses": event_fabric_access_classes.len(),
             "replayState": replay_posture.get("state").cloned().unwrap_or_else(|| json!("unknown"))
         },
         "encryptedDetailRefs": [],
@@ -1480,6 +1500,134 @@ fn logging_security_evidence_materialization_budget(
     };
     validate_materialization_budget(&budget).map_err(anyhow::Error::from)?;
     Ok(budget)
+}
+
+fn logging_security_access_group(
+    state: &ApiState,
+    now: u64,
+) -> Result<AccessGroupRecord, ApiError> {
+    let service_ref = format!("service:logging:{}", state.service_identity.service_pk);
+    let group = AccessGroupRecord {
+        kind: Some(RECORD_ACCESS_GROUP.to_string()),
+        group_id: "access-group:logging.security.default".to_string(),
+        owner_ref: service_ref.clone(),
+        subject_ref: "logging.events.encryptedDetail".to_string(),
+        content_classes: vec![
+            "encryptedDetail".to_string(),
+            "diagnosticDetail".to_string(),
+        ],
+        member_refs: vec![service_ref.clone(), "constitute-security".to_string()],
+        admin_refs: vec![service_ref],
+        current_epoch_id: "access-epoch:logging.security.default:1".to_string(),
+        partition_refs: vec!["partition:event-fabric:logging-security".to_string()],
+        policy_refs: vec!["policy:logging.security.default".to_string()],
+        safe_facts: json!({
+            "purpose": "securityReplay",
+            "retentionWindow": "90d",
+            "readability": "futureEpochsOnly"
+        }),
+        issued_at: now,
+    };
+    validate_access_group(&group).map_err(anyhow::Error::from)?;
+    Ok(group)
+}
+
+fn logging_security_access_epoch(
+    state: &ApiState,
+    now: u64,
+) -> Result<AccessEpochRecord, ApiError> {
+    let service_ref = format!("service:logging:{}", state.service_identity.service_pk);
+    let epoch = AccessEpochRecord {
+        kind: Some(RECORD_ACCESS_EPOCH.to_string()),
+        epoch_id: "access-epoch:logging.security.default:1".to_string(),
+        group_id: "access-group:logging.security.default".to_string(),
+        sequence: 1,
+        change_kind: "create".to_string(),
+        previous_epoch_id: None,
+        member_refs: vec![service_ref, "constitute-security".to_string()],
+        added_member_refs: vec!["constitute-security".to_string()],
+        removed_member_refs: Vec::new(),
+        partition_refs: vec!["partition:event-fabric:logging-security".to_string()],
+        key_ref: "key-ref:logging.security.default:epoch:1".to_string(),
+        proof_refs: vec!["profile:logging.security.default".to_string()],
+        safe_facts: json!({
+            "purpose": "securityReplay",
+            "contentClasses": ["encryptedDetail", "diagnosticDetail"]
+        }),
+        issued_at: now,
+        expires_at: Some(now + 90 * 24 * 60 * 60),
+    };
+    validate_access_epoch(&epoch).map_err(anyhow::Error::from)?;
+    Ok(epoch)
+}
+
+fn logging_event_fabric_access_classes(
+    state: &ApiState,
+    now: u64,
+) -> Result<Vec<EventFabricAccessClassRecord>, ApiError> {
+    let group_id = "access-group:logging.security.default".to_string();
+    let classes = vec![
+        EventFabricAccessClassRecord {
+            kind: Some(RECORD_EVENT_FABRIC_ACCESS_CLASS.to_string()),
+            class_id: "event-class:logging.security.encrypted-detail".to_string(),
+            content_class: "encryptedDetail".to_string(),
+            privacy_tier: "domainEncrypted".to_string(),
+            event_classes: vec![
+                LOG_EVIDENCE_PROFILE_EVENT_SECURITY_AUDIT.to_string(),
+                LOG_EVIDENCE_PROFILE_EVENT_RUNTIME_DIAGNOSTIC.to_string(),
+                LOG_EVIDENCE_PROFILE_EVENT_SERVICE_EVENT.to_string(),
+                LOG_EVIDENCE_PROFILE_EVENT_STORAGE_ACCESS.to_string(),
+                LOG_EVIDENCE_PROFILE_EVENT_MEDIA_PATH.to_string(),
+            ],
+            access_group_refs: vec![group_id.clone()],
+            processor_role_refs: vec![
+                "role:logging.processor".to_string(),
+                "role:security.processor".to_string(),
+            ],
+            storage_class: state.engine.archive_container_id(),
+            retention_class: "rolling.security-evidence".to_string(),
+            safe_fact_policy: "indexOnly".to_string(),
+            index_policy: json!({
+                "bitemporal": true,
+                "safeKeys": ["producer.service", "category", "severity", "outcome", "subject.kind"],
+                "highCardinalityOverflow": "encryptedDetailRef"
+            }),
+            safe_facts: json!({
+                "processorAgreement": "logging-security-replay",
+                "detailCustody": "encryptedDetailRef"
+            }),
+            issued_at: now,
+        },
+        EventFabricAccessClassRecord {
+            kind: Some(RECORD_EVENT_FABRIC_ACCESS_CLASS.to_string()),
+            class_id: "event-class:logging.security.diagnostic-detail".to_string(),
+            content_class: "diagnosticDetail".to_string(),
+            privacy_tier: "domainEncrypted".to_string(),
+            event_classes: vec![LOG_EVIDENCE_PROFILE_EVENT_RUNTIME_DIAGNOSTIC.to_string()],
+            access_group_refs: vec![group_id],
+            processor_role_refs: vec![
+                "role:logging.processor".to_string(),
+                "role:security.processor".to_string(),
+            ],
+            storage_class: state.engine.archive_container_id(),
+            retention_class: "rolling.diagnostic-detail".to_string(),
+            safe_fact_policy: "minimal".to_string(),
+            index_policy: json!({
+                "bitemporal": true,
+                "safeKeys": ["kind", "level", "channelId"],
+                "highCardinalityOverflow": "encryptedDetailRef"
+            }),
+            safe_facts: json!({
+                "processorAgreement": "runtime-diagnostic-replay",
+                "detailCustody": "encryptedDetailRef"
+            }),
+            issued_at: now,
+        },
+    ];
+    for class in &classes {
+        validate_event_fabric_access_class(class).map_err(anyhow::Error::from)?;
+    }
+    Ok(classes)
 }
 
 fn security_evidence_profile(state: &ApiState, now: u64) -> Result<LogEvidenceProfile, ApiError> {
@@ -3280,6 +3428,36 @@ mod tests {
             1
         );
         assert_eq!(projection["payload"]["storage"]["status"], "not_configured");
+        let event_fabric = &projection["payload"]["eventFabric"];
+        assert_eq!(event_fabric["accessGroups"].as_array().unwrap().len(), 1);
+        assert_eq!(event_fabric["accessEpochs"].as_array().unwrap().len(), 1);
+        assert_eq!(event_fabric["accessClasses"].as_array().unwrap().len(), 2);
+        let access_group: AccessGroupRecord =
+            serde_json::from_value(event_fabric["accessGroups"][0].clone()).expect("access group");
+        validate_access_group(&access_group).expect("valid access group");
+        assert_eq!(
+            access_group.subject_ref,
+            "logging.events.encryptedDetail".to_string()
+        );
+        assert!(
+            access_group
+                .content_classes
+                .contains(&"encryptedDetail".to_string())
+        );
+        let access_epoch: AccessEpochRecord =
+            serde_json::from_value(event_fabric["accessEpochs"][0].clone()).expect("access epoch");
+        validate_access_epoch(&access_epoch).expect("valid access epoch");
+        assert_eq!(access_epoch.group_id, access_group.group_id);
+        let access_class: EventFabricAccessClassRecord =
+            serde_json::from_value(event_fabric["accessClasses"][0].clone())
+                .expect("event fabric access class");
+        validate_event_fabric_access_class(&access_class).expect("valid event fabric access class");
+        assert_eq!(access_class.content_class, "encryptedDetail");
+        assert!(
+            access_class
+                .processor_role_refs
+                .contains(&"role:security.processor".to_string())
+        );
         let profile = &projection["payload"]["evidenceProfiles"][0];
         assert_eq!(profile["kind"], "logging.evidence.profile");
         assert_eq!(profile["consumerRef"], "constitute-security");
@@ -3290,6 +3468,8 @@ mod tests {
         );
         assert_eq!(projection["safeFacts"]["securityEvidenceProfiles"], 1);
         assert_eq!(projection["safeFacts"]["securityMaterializationBudgets"], 1);
+        assert_eq!(projection["safeFacts"]["eventFabricAccessGroups"], 1);
+        assert_eq!(projection["safeFacts"]["eventFabricAccessClasses"], 2);
         assert_eq!(
             projection["materializationBudget"]["kind"],
             "materialization.budget"
