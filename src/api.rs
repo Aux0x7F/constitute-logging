@@ -7,20 +7,21 @@ use axum::{Json, Router};
 use constitute_protocol::{
     AccessEpochRecord, AccessGroupRecord, CAPABILITY_PROJECTION_DELTA_APPLY,
     CAPABILITY_PROJECTION_OBSERVE, CaacEnvelope, ConsumerFloor, EncryptedDetailRef,
-    EventFabricAccessClassRecord, LOG_EVIDENCE_DETAIL_CUSTODY_ENCRYPTED_DETAIL_REF,
-    LOG_EVIDENCE_PROFILE_EVENT_MEDIA_PATH, LOG_EVIDENCE_PROFILE_EVENT_RUNTIME_DIAGNOSTIC,
-    LOG_EVIDENCE_PROFILE_EVENT_SECURITY_AUDIT, LOG_EVIDENCE_PROFILE_EVENT_SERVICE_EVENT,
-    LOG_EVIDENCE_PROFILE_EVENT_STORAGE_ACCESS, LOG_EVIDENCE_PROFILE_KIND, LogCategory,
-    LogEventEnvelope, LogEvidenceProfile, LogOutcome, LogSeverity, MaterializationBudget,
-    MaterializationSchemaPosture, ProjectionDeltaOp, ProjectionDeltaOpKind, ProjectionPathSegment,
-    RECORD_ACCESS_EPOCH, RECORD_ACCESS_GROUP, RECORD_CONSUMER_FLOOR,
-    RECORD_EVENT_FABRIC_ACCESS_CLASS, RECORD_MATERIALIZATION_BUDGET, SWARM_FRAME_VERSION,
+    EventFabricAccessClassRecord, EventFabricProcessorContractRecord,
+    LOG_EVIDENCE_DETAIL_CUSTODY_ENCRYPTED_DETAIL_REF, LOG_EVIDENCE_PROFILE_EVENT_MEDIA_PATH,
+    LOG_EVIDENCE_PROFILE_EVENT_RUNTIME_DIAGNOSTIC, LOG_EVIDENCE_PROFILE_EVENT_SECURITY_AUDIT,
+    LOG_EVIDENCE_PROFILE_EVENT_SERVICE_EVENT, LOG_EVIDENCE_PROFILE_EVENT_STORAGE_ACCESS,
+    LOG_EVIDENCE_PROFILE_KIND, LogCategory, LogEventEnvelope, LogEvidenceProfile, LogOutcome,
+    LogSeverity, MaterializationBudget, MaterializationSchemaPosture, ProjectionDeltaOp,
+    ProjectionDeltaOpKind, ProjectionPathSegment, RECORD_ACCESS_EPOCH, RECORD_ACCESS_GROUP,
+    RECORD_CONSUMER_FLOOR, RECORD_EVENT_FABRIC_ACCESS_CLASS,
+    RECORD_EVENT_FABRIC_PROCESSOR_CONTRACT, RECORD_MATERIALIZATION_BUDGET, SWARM_FRAME_VERSION,
     StoragePinIntent, SwarmFrame, SwarmFrameBody, SwarmFrameKind, SwarmProjectionDelta,
     SwarmProjectionSnapshot, SwarmRecordRef, ZoneScope, open_envelope, seal_envelope, sha256_hex,
     swarm_frame_id, validate_access_epoch, validate_access_group, validate_consumer_floor,
-    validate_event_fabric_access_class, validate_log_evidence_profile,
-    validate_materialization_budget, validate_projection_delta, validate_projection_snapshot,
-    validate_storage_pin_intent, validate_swarm_frame,
+    validate_event_fabric_access_class, validate_event_fabric_processor_contract,
+    validate_log_evidence_profile, validate_materialization_budget, validate_projection_delta,
+    validate_projection_snapshot, validate_storage_pin_intent, validate_swarm_frame,
 };
 use reqwest::Client;
 use serde::Deserialize;
@@ -1157,6 +1158,13 @@ fn logging_dashboard_projection(
         5000,
         now,
     )?;
+    let event_fabric_processor_contracts = logging_event_fabric_processor_contracts(
+        state,
+        now,
+        &event_fabric_access_classes,
+        &materialization_budget,
+        &security_budget,
+    )?;
     let coverage = json!({
         "materializedCount": materialized_count,
         "targetCount": target_count,
@@ -1207,6 +1215,11 @@ fn logging_dashboard_projection(
                     .map(serde_json::to_value)
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(anyhow::Error::from)?,
+                "processorContracts": event_fabric_processor_contracts
+                    .iter()
+                    .map(serde_json::to_value)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(anyhow::Error::from)?,
                 "processorRoles": ["role:logging.processor", "role:security.processor"],
                 "contentClasses": security_access_group.content_classes,
                 "currentEpochId": security_access_epoch.epoch_id
@@ -1228,6 +1241,7 @@ fn logging_dashboard_projection(
             "securityMaterializationBudgets": 1,
             "eventFabricAccessGroups": 1,
             "eventFabricAccessClasses": event_fabric_access_classes.len(),
+            "eventFabricProcessorContracts": event_fabric_processor_contracts.len(),
             "replayState": replay_posture.get("state").cloned().unwrap_or_else(|| json!("unknown"))
         },
         "encryptedDetailRefs": [],
@@ -1628,6 +1642,146 @@ fn logging_event_fabric_access_classes(
         validate_event_fabric_access_class(class).map_err(anyhow::Error::from)?;
     }
     Ok(classes)
+}
+
+fn logging_event_fabric_processor_contracts(
+    state: &ApiState,
+    now: u64,
+    access_classes: &[EventFabricAccessClassRecord],
+    dashboard_budget: &MaterializationBudget,
+    security_budget: &MaterializationBudget,
+) -> Result<Vec<EventFabricProcessorContractRecord>, ApiError> {
+    let service_ref = format!("service:logging:{}", state.service_identity.service_pk);
+    let mut access_class_refs = access_classes
+        .iter()
+        .map(|class| class.class_id.clone())
+        .collect::<Vec<_>>();
+    access_class_refs.sort();
+    access_class_refs.dedup();
+    let mut input_event_classes = access_classes
+        .iter()
+        .flat_map(|class| class.event_classes.iter().cloned())
+        .collect::<Vec<_>>();
+    input_event_classes.sort();
+    input_event_classes.dedup();
+    let mut input_content_classes = access_classes
+        .iter()
+        .map(|class| class.content_class.clone())
+        .collect::<Vec<_>>();
+    input_content_classes.sort();
+    input_content_classes.dedup();
+    let access_group_refs = vec!["access-group:logging.security.default".to_string()];
+    let archive_ref = state.engine.archive_container_id();
+    let contracts = vec![
+        EventFabricProcessorContractRecord {
+            kind: Some(RECORD_EVENT_FABRIC_PROCESSOR_CONTRACT.to_string()),
+            processor_contract_id: "processor-contract:logging.dashboard".to_string(),
+            fabric_ref: "event-fabric:logging.default".to_string(),
+            processor_ref: service_ref.clone(),
+            processor_role_ref: "role:logging.processor".to_string(),
+            state: "ready".to_string(),
+            input_access_class_refs: access_class_refs.clone(),
+            input_event_classes: input_event_classes.clone(),
+            input_content_classes: input_content_classes.clone(),
+            output_refs: vec![
+                "projection:logging.events".to_string(),
+                "projection:logging.dashboard".to_string(),
+                "projection:logging.health".to_string(),
+            ],
+            storage_refs: vec![archive_ref.clone()],
+            access_group_refs: access_group_refs.clone(),
+            consumer_floor: dashboard_budget.consumer_floor.clone(),
+            materialization_budget: Some(dashboard_budget.clone()),
+            bitemporal_policy: json!({
+                "eventTimeField": "occurredAt",
+                "observedTimeField": "receivedAt"
+            }),
+            schema_policy: json!({
+                "currentVersion": "constitute.logging.dashboard.v1",
+                "unknownVersionPosture": "ignore"
+            }),
+            compaction_policy: json!({
+                "snapshotCadence": "bounded",
+                "compactionFloor": "consumerFloor.compactionFloor"
+            }),
+            cardinality_policy: json!({
+                "maxLabelValues": 250,
+                "highCardinalityOverflow": "encryptedDetailRef"
+            }),
+            encrypted_detail_custody: json!({
+                "state": "referenceOnly",
+                "accessGroupRefs": access_group_refs.clone()
+            }),
+            sampling_policy: json!({
+                "state": "adaptive",
+                "degradeBefore": ["authority", "route", "activation"]
+            }),
+            safe_facts: json!({
+                "purpose": "dashboardProjection",
+                "detailCustody": "encryptedDetailRef"
+            }),
+            evidence_refs: vec!["logging.dashboard.processor".to_string()],
+            blocked_reasons: Vec::new(),
+            issued_at: now,
+            expires_at: Some(now + 5 * 60),
+        },
+        EventFabricProcessorContractRecord {
+            kind: Some(RECORD_EVENT_FABRIC_PROCESSOR_CONTRACT.to_string()),
+            processor_contract_id: "processor-contract:logging.security".to_string(),
+            fabric_ref: "event-fabric:logging.default".to_string(),
+            processor_ref: "constitute-security".to_string(),
+            processor_role_ref: "role:security.processor".to_string(),
+            state: "ready".to_string(),
+            input_access_class_refs: access_class_refs,
+            input_event_classes,
+            input_content_classes,
+            output_refs: vec![
+                "security:evidence:logging.default".to_string(),
+                "storage:logging.security.archive".to_string(),
+            ],
+            storage_refs: vec![archive_ref],
+            access_group_refs,
+            consumer_floor: security_budget.consumer_floor.clone(),
+            materialization_budget: Some(security_budget.clone()),
+            bitemporal_policy: json!({
+                "eventTimeField": "occurredAt",
+                "observedTimeField": "receivedAt"
+            }),
+            schema_policy: json!({
+                "currentVersion": "logging.security.evidence.v1",
+                "unknownVersionPosture": "ignore"
+            }),
+            compaction_policy: json!({
+                "snapshotCadence": "retention-window",
+                "compactionFloor": "retention-window:90d"
+            }),
+            cardinality_policy: json!({
+                "rawDetail": "byObjectRef",
+                "safeFacts": "indexedSummary",
+                "highCardinalityOverflow": "encryptedDetailRef"
+            }),
+            encrypted_detail_custody: json!({
+                "state": "referenceOnly",
+                "accessGroupRefs": ["access-group:logging.security.default"]
+            }),
+            sampling_policy: json!({
+                "state": "fullWithinRetention",
+                "degradeBefore": ["authority", "route", "activation"]
+            }),
+            safe_facts: json!({
+                "purpose": "securityReplay",
+                "detailCustody": "encryptedDetailRef"
+            }),
+            evidence_refs: vec!["logging.security.default".to_string()],
+            blocked_reasons: Vec::new(),
+            issued_at: now,
+            expires_at: Some(now + 90 * 24 * 60 * 60),
+        },
+    ];
+    for contract in &contracts {
+        validate_event_fabric_processor_contract(contract).map_err(anyhow::Error::from)?;
+    }
+    Ok(contracts)
 }
 
 fn security_evidence_profile(state: &ApiState, now: u64) -> Result<LogEvidenceProfile, ApiError> {
@@ -3458,6 +3612,32 @@ mod tests {
                 .processor_role_refs
                 .contains(&"role:security.processor".to_string())
         );
+        assert_eq!(
+            event_fabric["processorContracts"].as_array().unwrap().len(),
+            2
+        );
+        let processor_contract: EventFabricProcessorContractRecord =
+            serde_json::from_value(event_fabric["processorContracts"][0].clone())
+                .expect("event fabric processor contract");
+        validate_event_fabric_processor_contract(&processor_contract)
+            .expect("valid event fabric processor contract");
+        assert_eq!(
+            processor_contract.fabric_ref,
+            "event-fabric:logging.default"
+        );
+        assert_eq!(
+            processor_contract
+                .input_access_class_refs
+                .contains(&access_class.class_id),
+            true
+        );
+        assert_eq!(
+            processor_contract
+                .consumer_floor
+                .as_ref()
+                .map(|floor| floor.lag_state.as_str()),
+            Some("caughtUp")
+        );
         let profile = &projection["payload"]["evidenceProfiles"][0];
         assert_eq!(profile["kind"], "logging.evidence.profile");
         assert_eq!(profile["consumerRef"], "constitute-security");
@@ -3470,6 +3650,7 @@ mod tests {
         assert_eq!(projection["safeFacts"]["securityMaterializationBudgets"], 1);
         assert_eq!(projection["safeFacts"]["eventFabricAccessGroups"], 1);
         assert_eq!(projection["safeFacts"]["eventFabricAccessClasses"], 2);
+        assert_eq!(projection["safeFacts"]["eventFabricProcessorContracts"], 2);
         assert_eq!(
             projection["materializationBudget"]["kind"],
             "materialization.budget"
