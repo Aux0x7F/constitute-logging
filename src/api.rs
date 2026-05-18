@@ -15,13 +15,15 @@ use constitute_protocol::{
     LogSeverity, MaterializationBudget, MaterializationSchemaPosture, ProjectionDeltaOp,
     ProjectionDeltaOpKind, ProjectionPathSegment, RECORD_ACCESS_EPOCH, RECORD_ACCESS_GROUP,
     RECORD_CONSUMER_FLOOR, RECORD_EVENT_FABRIC_ACCESS_CLASS,
-    RECORD_EVENT_FABRIC_PROCESSOR_CONTRACT, RECORD_MATERIALIZATION_BUDGET, SWARM_FRAME_VERSION,
+    RECORD_EVENT_FABRIC_PROCESSOR_CONTRACT, RECORD_MATERIALIZATION_BUDGET,
+    RECORD_SECURITY_PROCESSOR_SEED, SWARM_FRAME_VERSION, SecurityProcessorSeedRecord,
     StoragePinIntent, SwarmFrame, SwarmFrameBody, SwarmFrameKind, SwarmProjectionDelta,
     SwarmProjectionSnapshot, SwarmRecordRef, ZoneScope, open_envelope, seal_envelope, sha256_hex,
     swarm_frame_id, validate_access_epoch, validate_access_group, validate_consumer_floor,
     validate_event_fabric_access_class, validate_event_fabric_processor_contract,
     validate_log_evidence_profile, validate_materialization_budget, validate_projection_delta,
-    validate_projection_snapshot, validate_storage_pin_intent, validate_swarm_frame,
+    validate_projection_snapshot, validate_security_processor_seed, validate_storage_pin_intent,
+    validate_swarm_frame,
 };
 use reqwest::Client;
 use serde::Deserialize;
@@ -1165,6 +1167,14 @@ fn logging_dashboard_projection(
         &materialization_budget,
         &security_budget,
     )?;
+    let security_processor_seed = logging_security_processor_seed(
+        state,
+        now,
+        &event_fabric_access_classes,
+        &event_fabric_processor_contracts,
+        &evidence_profile,
+        &security_budget,
+    )?;
     let coverage = json!({
         "materializedCount": materialized_count,
         "targetCount": target_count,
@@ -1220,6 +1230,7 @@ fn logging_dashboard_projection(
                     .map(serde_json::to_value)
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(anyhow::Error::from)?,
+                "securityProcessorSeeds": [serde_json::to_value(security_processor_seed.clone()).map_err(anyhow::Error::from)?],
                 "processorRoles": ["role:logging.processor", "role:security.processor"],
                 "contentClasses": security_access_group.content_classes,
                 "currentEpochId": security_access_epoch.epoch_id
@@ -1242,6 +1253,7 @@ fn logging_dashboard_projection(
             "eventFabricAccessGroups": 1,
             "eventFabricAccessClasses": event_fabric_access_classes.len(),
             "eventFabricProcessorContracts": event_fabric_processor_contracts.len(),
+            "securityProcessorSeeds": 1,
             "replayState": replay_posture.get("state").cloned().unwrap_or_else(|| json!("unknown"))
         },
         "encryptedDetailRefs": [],
@@ -1782,6 +1794,81 @@ fn logging_event_fabric_processor_contracts(
         validate_event_fabric_processor_contract(contract).map_err(anyhow::Error::from)?;
     }
     Ok(contracts)
+}
+
+fn logging_security_processor_seed(
+    state: &ApiState,
+    now: u64,
+    access_classes: &[EventFabricAccessClassRecord],
+    processor_contracts: &[EventFabricProcessorContractRecord],
+    evidence_profile: &LogEvidenceProfile,
+    security_budget: &MaterializationBudget,
+) -> Result<SecurityProcessorSeedRecord, ApiError> {
+    let mut access_class_refs = access_classes
+        .iter()
+        .map(|class| class.class_id.clone())
+        .collect::<Vec<_>>();
+    access_class_refs.sort();
+    access_class_refs.dedup();
+    let mut input_event_classes = access_classes
+        .iter()
+        .flat_map(|class| class.event_classes.iter().cloned())
+        .collect::<Vec<_>>();
+    input_event_classes.sort();
+    input_event_classes.dedup();
+    let mut input_content_classes = access_classes
+        .iter()
+        .map(|class| class.content_class.clone())
+        .collect::<Vec<_>>();
+    input_content_classes.sort();
+    input_content_classes.dedup();
+    let processor_contract_refs = processor_contracts
+        .iter()
+        .filter(|contract| contract.processor_role_ref == "role:security.processor")
+        .map(|contract| contract.processor_contract_id.clone())
+        .collect::<Vec<_>>();
+    let seed = SecurityProcessorSeedRecord {
+        kind: Some(RECORD_SECURITY_PROCESSOR_SEED.to_string()),
+        seed_id: "security-seed:logging.default".to_string(),
+        fabric_ref: "event-fabric:logging.default".to_string(),
+        processor_ref: "constitute-security".to_string(),
+        processor_role_ref: "role:security.processor".to_string(),
+        state: "ready".to_string(),
+        threat_analysis_role: "eventFabricThreatAnalysis".to_string(),
+        input_access_class_refs: access_class_refs,
+        input_event_classes,
+        input_content_classes,
+        access_group_refs: vec!["access-group:logging.security.default".to_string()],
+        processor_contract_refs,
+        evidence_profile_refs: vec![evidence_profile.profile_id.clone()],
+        materialization_budget_refs: vec![security_budget.budget_id.clone()],
+        storage_refs: vec![state.engine.archive_container_id()],
+        detail_refs: vec!["encrypted-detail:logging.default".to_string()],
+        alert_output_refs: vec!["security:alerts:logging.default".to_string()],
+        evidence_hold_refs: vec!["security:evidence-hold:logging.default".to_string()],
+        retention_hold_refs: vec!["retention:security-hold:logging.default".to_string()],
+        encrypted_detail_custody: json!({
+            "state": "referenceOnly",
+            "accessGroupRefs": ["access-group:logging.security.default"],
+            "detailRefs": ["encrypted-detail:logging.default"]
+        }),
+        semantic_boundaries: json!({
+            "logging": "mayConsumeMaterializations",
+            "storage": "ciphertextFulfillmentOnly",
+            "eventDomain": "doesNotOwn"
+        }),
+        safe_facts: json!({
+            "purpose": "securityThreatAnalysis",
+            "detailCustody": "encryptedDetailRef",
+            "alerting": "seeded"
+        }),
+        evidence_refs: vec!["logging.security.default".to_string()],
+        blocked_reasons: Vec::new(),
+        issued_at: now,
+        expires_at: Some(now + 90 * 24 * 60 * 60),
+    };
+    validate_security_processor_seed(&seed).map_err(anyhow::Error::from)?;
+    Ok(seed)
 }
 
 fn security_evidence_profile(state: &ApiState, now: u64) -> Result<LogEvidenceProfile, ApiError> {
@@ -3616,6 +3703,13 @@ mod tests {
             event_fabric["processorContracts"].as_array().unwrap().len(),
             2
         );
+        assert_eq!(
+            event_fabric["securityProcessorSeeds"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         let processor_contract: EventFabricProcessorContractRecord =
             serde_json::from_value(event_fabric["processorContracts"][0].clone())
                 .expect("event fabric processor contract");
@@ -3638,6 +3732,18 @@ mod tests {
                 .map(|floor| floor.lag_state.as_str()),
             Some("caughtUp")
         );
+        let security_seed: SecurityProcessorSeedRecord =
+            serde_json::from_value(event_fabric["securityProcessorSeeds"][0].clone())
+                .expect("security processor seed");
+        validate_security_processor_seed(&security_seed).expect("valid security processor seed");
+        assert_eq!(security_seed.processor_ref, "constitute-security");
+        assert_eq!(
+            security_seed
+                .semantic_boundaries
+                .get("eventDomain")
+                .and_then(|value| value.as_str()),
+            Some("doesNotOwn")
+        );
         let profile = &projection["payload"]["evidenceProfiles"][0];
         assert_eq!(profile["kind"], "logging.evidence.profile");
         assert_eq!(profile["consumerRef"], "constitute-security");
@@ -3651,6 +3757,7 @@ mod tests {
         assert_eq!(projection["safeFacts"]["eventFabricAccessGroups"], 1);
         assert_eq!(projection["safeFacts"]["eventFabricAccessClasses"], 2);
         assert_eq!(projection["safeFacts"]["eventFabricProcessorContracts"], 2);
+        assert_eq!(projection["safeFacts"]["securityProcessorSeeds"], 1);
         assert_eq!(
             projection["materializationBudget"]["kind"],
             "materialization.budget"
