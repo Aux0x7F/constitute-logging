@@ -1,3 +1,4 @@
+// domain-owned-vocabulary: logging.sqlite3
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};

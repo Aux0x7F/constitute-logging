@@ -1,3 +1,4 @@
+// domain-owned-vocabulary: logging.cybersec.default logging.cybersec.default.90d logging.cybersec.evidence.v1 logging.dashboard.cybersecSummary logging.dashboard.observe logging.dashboard.processor logging.default.72h.low logging.event logging.events.encryptedDetail logging.events.safeIndex logging.health.observe logging.projection logging.service logging.settings logging.surface logging.surface.observe logging.unknown runtime.diagnostics runtime.diagnostics.log runtime.projection.store service.projection.request service.projection.response swarm.route
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::http::StatusCode;
@@ -40,15 +41,15 @@ use crate::types::{
 
 pub(crate) const LOGGING_CHANNELS: [&str; 4] = [
     "logging.surface",
-    "logging.events",
-    "logging.health",
-    "logging.dashboard",
+    constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
+    constitute_protocol::PROJECTION_CHANNEL_LOGGING_HEALTH,
+    constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD,
 ];
 
 pub(crate) const LOGGING_EDGE_CAPABILITIES: [&str; 6] = [
     CAPABILITY_PROJECTION_OBSERVE,
-    "logging.events.ingest",
-    "logging.events.observe",
+    constitute_protocol::CAPABILITY_LOGGING_EVENTS_INGEST,
+    constitute_protocol::CAPABILITY_LOGGING_EVENTS_OBSERVE,
     "logging.health.observe",
     "logging.dashboard.observe",
     "logging.surface.observe",
@@ -144,22 +145,22 @@ async fn hosted_service_manifest(State(state): State<ApiState>) -> impl IntoResp
         "channels": [
             {
                 "channelId": "logging.surface",
-                "recordKinds": ["projection.delta"],
+                "recordKinds": [constitute_protocol::RECORD_PROJECTION_DELTA],
                 "capabilities": ["logging.surface.observe"]
             },
             {
-                "channelId": "logging.events",
-                "recordKinds": ["logging.event", "projection.delta"],
-                "capabilities": ["logging.events.ingest", "logging.events.observe"]
+                "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
+                "recordKinds": ["logging.event", constitute_protocol::RECORD_PROJECTION_DELTA],
+                "capabilities": [constitute_protocol::CAPABILITY_LOGGING_EVENTS_INGEST, constitute_protocol::CAPABILITY_LOGGING_EVENTS_OBSERVE]
             },
             {
-                "channelId": "logging.health",
-                "recordKinds": ["projection.delta"],
+                "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_HEALTH,
+                "recordKinds": [constitute_protocol::RECORD_PROJECTION_DELTA],
                 "capabilities": ["logging.health.observe"]
             },
             {
-                "channelId": "logging.dashboard",
-                "recordKinds": ["projection.delta"],
+                "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD,
+                "recordKinds": [constitute_protocol::RECORD_PROJECTION_DELTA],
                 "capabilities": ["logging.dashboard.observe"]
             }
         ],
@@ -207,7 +208,7 @@ async fn ingest_edge_frame_at(
         .unwrap_or_default()
         .trim()
         .to_string();
-    if channel_id != "logging.events" {
+    if channel_id != constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS {
         return Err(anyhow::anyhow!("logging edge frame targets unsupported channel").into());
     }
     if frame
@@ -238,7 +239,7 @@ async fn ingest_edge_frame_at(
         .unwrap_or_else(|| frame.frame_id.clone());
     let projection_payload = json!({
         "requestId": request_id,
-        "channelId": "logging.events",
+        "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
         "baseRevision": projection_base_revision(&payload),
         "limit": 2500,
         "filters": payload.get("filters").cloned().unwrap_or_else(|| json!({}))
@@ -252,7 +253,7 @@ async fn ingest_edge_frame_at(
     Ok(json!({
         "status": "accepted",
         "frameId": frame.frame_id,
-        "channelId": "logging.events",
+        "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
         "accepted": ingest.accepted,
         "duplicate": ingest.duplicate,
         "cursor": ingest.cursor,
@@ -366,14 +367,16 @@ async fn observe_edge_frame_at(
         "logging.surface" => {
             logging_surface_projection(state, &host_gateway_pk, request_id, now_seconds)
         }
-        "logging.events" => logging_events_projection(state, &payload, request_id, now_seconds),
-        "logging.health" => logging_health_projection(
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS => {
+            logging_events_projection(state, &payload, request_id, now_seconds)
+        }
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_HEALTH => logging_health_projection(
             state,
             request_id,
             projection_base_revision(&payload),
             now_seconds,
         ),
-        "logging.dashboard" => {
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD => {
             logging_dashboard_projection(state, &payload, request_id, now_seconds)
         }
         _ => Err(anyhow::anyhow!("unsupported logging projection channel").into()),
@@ -428,7 +431,8 @@ pub async fn process_gateway_frame(
 fn is_route_observation_frame(frame: &SwarmFrame) -> bool {
     frame.kind == SwarmFrameKind::RecordPublish
         && frame.channel_id.as_deref() == Some("swarm.route")
-        && frame.record_ref.as_ref().map(|record| record.kind.as_str()) == Some("route.observation")
+        && frame.record_ref.as_ref().map(|record| record.kind.as_str())
+            == Some(constitute_protocol::RECORD_ROUTE_OBSERVATION)
 }
 
 fn projection_delta_response_frame(
@@ -445,7 +449,7 @@ fn projection_delta_response_frame(
     let channel_id = source_frame
         .channel_id
         .clone()
-        .unwrap_or_else(|| "logging.events".to_string());
+        .unwrap_or_else(|| constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS.to_string());
     let mut frame = SwarmFrame {
         version: SWARM_FRAME_VERSION,
         frame_id: String::new(),
@@ -459,7 +463,7 @@ fn projection_delta_response_frame(
         correlation_id: Some(source_frame.frame_id.clone()),
         channel_id: Some(channel_id),
         record_ref: Some(SwarmRecordRef {
-            kind: "projection.delta".to_string(),
+            kind: constitute_protocol::RECORD_PROJECTION_DELTA.to_string(),
             id: projection_id.to_string(),
             revision: delta.get("revision").and_then(Value::as_u64),
         }),
@@ -469,9 +473,9 @@ fn projection_delta_response_frame(
             envelope: seal_frame_payload(
                 &state.service_identity,
                 source_frame,
-                "projection.delta",
+                constitute_protocol::RECORD_PROJECTION_DELTA,
                 json!({
-                    "recordKind": "projection.delta",
+                    "recordKind": constitute_protocol::RECORD_PROJECTION_DELTA,
                     "delta": delta,
                 }),
                 now,
@@ -509,7 +513,7 @@ fn projection_snapshot_response_frame(
         correlation_id: Some(source_frame.frame_id.clone()),
         channel_id: source_frame.channel_id.clone(),
         record_ref: Some(SwarmRecordRef {
-            kind: "projection.snapshot".to_string(),
+            kind: constitute_protocol::RECORD_PROJECTION_SNAPSHOT.to_string(),
             id: snapshot.projection_id.clone(),
             revision: Some(snapshot.revision),
         }),
@@ -519,9 +523,9 @@ fn projection_snapshot_response_frame(
             envelope: seal_frame_payload(
                 &state.service_identity,
                 source_frame,
-                "projection.snapshot",
+                constitute_protocol::RECORD_PROJECTION_SNAPSHOT,
                 json!({
-                    "recordKind": "projection.snapshot",
+                    "recordKind": constitute_protocol::RECORD_PROJECTION_SNAPSHOT,
                     "snapshot": snapshot,
                 }),
                 now,
@@ -548,25 +552,25 @@ fn storage_pin_intent_frame(
         frame_id: String::new(),
         kind: SwarmFrameKind::StoragePinIntent,
         issuer: format!("service:logging:{}", state.service_identity.service_pk),
-        audience: json!({ "capability": "storage.pin" }),
+        audience: json!({ "capability": constitute_protocol::CAPABILITY_STORAGE_PIN }),
         zone_scope: source_frame.zone_scope.clone().or_else(default_zone_scope),
         issued_at: now,
         expires_at: Some(now + 60_000),
         nonce: format!("logging-storage-pin-{now}-{}", intent.intent_id),
         correlation_id: Some(source_frame.frame_id.clone()),
-        channel_id: Some("storage.pin.intent".to_string()),
+        channel_id: Some(constitute_protocol::RECORD_STORAGE_PIN_INTENT.to_string()),
         record_ref: Some(SwarmRecordRef {
-            kind: "storage.pin.intent".to_string(),
+            kind: constitute_protocol::RECORD_STORAGE_PIN_INTENT.to_string(),
             id: intent.intent_id.clone(),
             revision: Some(1),
         }),
-        capability: Some("storage.pin".to_string()),
+        capability: Some(constitute_protocol::CAPABILITY_STORAGE_PIN.to_string()),
         body: SwarmFrameBody {
             encoding: "caac".to_string(),
             envelope: seal_frame_record(
                 &state.service_identity,
                 source_frame,
-                "storage.pin.intent",
+                constitute_protocol::RECORD_STORAGE_PIN_INTENT,
                 serde_json::to_value(intent).unwrap_or_else(|_| json!({})),
                 now,
             ),
@@ -745,11 +749,15 @@ async fn projection_adapter(
     let now = now_seconds();
     let projection = match channel_id.as_str() {
         "logging.surface" => logging_surface_projection(&state, &host_gateway_pk, request_id, now)?,
-        "logging.events" => logging_events_projection(&state, &payload, request_id, now)?,
-        "logging.health" => {
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS => {
+            logging_events_projection(&state, &payload, request_id, now)?
+        }
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_HEALTH => {
             logging_health_projection(&state, request_id, projection_base_revision(&payload), now)?
         }
-        "logging.dashboard" => logging_dashboard_projection(&state, &payload, request_id, now)?,
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD => {
+            logging_dashboard_projection(&state, &payload, request_id, now)?
+        }
         _ => return Err(anyhow::anyhow!("unsupported logging projection channel").into()),
     };
     Ok(Json(json!({
@@ -786,11 +794,11 @@ fn logging_surface_projection(
         "updatedAt": now,
         "nodes": [
             {
-                "nodeId": "logging.events",
+                "nodeId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
                 "path": "events",
                 "label": "Events",
                 "description": "Policy-materialized safe event stream.",
-                "backingChannel": "logging.events",
+                "backingChannel": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
                 "fields": [
                     {
                         "fieldId": "events",
@@ -807,11 +815,11 @@ fn logging_surface_projection(
                 ]
             },
             {
-                "nodeId": "logging.health",
+                "nodeId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_HEALTH,
                 "path": "health",
                 "label": "Health",
                 "description": "Logging service health and storage attachment state.",
-                "backingChannel": "logging.health",
+                "backingChannel": constitute_protocol::PROJECTION_CHANNEL_LOGGING_HEALTH,
                 "fields": [
                     {
                         "fieldId": "status",
@@ -828,11 +836,11 @@ fn logging_surface_projection(
                 ]
             },
             {
-                "nodeId": "logging.dashboard",
+                "nodeId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD,
                 "path": "dashboard",
                 "label": "Dashboard",
                 "description": "Reduced severity counts, critical shortlist, and coverage.",
-                "backingChannel": "logging.dashboard",
+                "backingChannel": constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD,
                 "fields": [
                     {
                         "fieldId": "severityCounts",
@@ -853,7 +861,7 @@ fn logging_surface_projection(
                 "path": "settings",
                 "label": "Settings",
                 "description": "Requested sync/retention policy knobs.",
-                "backingChannel": "logging.events",
+                "backingChannel": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
                 "fields": [
                     {
                         "fieldId": "rollingWindowHours",
@@ -919,7 +927,11 @@ fn logging_events_projection(
         .cloned()
         .filter(|value| value.is_object())
         .unwrap_or_else(|| json!({}));
-    let policy = projection_policy(payload, "logging.events", now);
+    let policy = projection_policy(
+        payload,
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
+        now,
+    );
     let mut query: EventSearchQuery = serde_json::from_value(filters.clone()).unwrap_or_default();
     apply_policy_to_query(&policy, &mut query, now);
     let limit = payload
@@ -975,7 +987,7 @@ fn logging_events_projection(
         .unwrap_or_else(|| format!("empty-{now}"));
     let replay_posture = logging_projection_replay_posture(
         state,
-        "logging.events",
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
         &policy_event_refs,
         materialized_count,
         target_count,
@@ -984,7 +996,7 @@ fn logging_events_projection(
     )?;
     let materialization_budget = logging_projection_materialization_budget(
         state,
-        "logging.events",
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
         &replay_posture,
         materialized_count,
         target_count,
@@ -993,7 +1005,7 @@ fn logging_events_projection(
     )?;
     let projection = json!({
         "requestId": request_id,
-        "channelId": "logging.events",
+        "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
         "service": "logging",
         "servicePk": state.service_identity.service_pk,
         "producer": {
@@ -1056,7 +1068,7 @@ fn logging_health_projection(
     let health = state.engine.health(storage_status)?;
     let projection = json!({
         "requestId": request_id,
-        "channelId": "logging.health",
+        "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_HEALTH,
         "service": "logging",
         "servicePk": state.service_identity.service_pk,
         "producer": {
@@ -1096,7 +1108,11 @@ fn logging_dashboard_projection(
     now: u64,
 ) -> Result<Value, ApiError> {
     let base_revision = projection_base_revision(payload);
-    let policy = projection_policy(payload, "logging.dashboard", now);
+    let policy = projection_policy(
+        payload,
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD,
+        now,
+    );
     let mut query = EventSearchQuery::default();
     apply_policy_to_query(&policy, &mut query, now);
     query.limit = Some(5000);
@@ -1142,7 +1158,7 @@ fn logging_dashboard_projection(
     let event_fabric_access_classes = logging_event_fabric_access_classes(state, now)?;
     let replay_posture = logging_projection_replay_posture(
         state,
-        "logging.dashboard",
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD,
         &policy_event_refs,
         materialized_count,
         target_count,
@@ -1151,7 +1167,7 @@ fn logging_dashboard_projection(
     )?;
     let materialization_budget = logging_projection_materialization_budget(
         state,
-        "logging.dashboard",
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD,
         &replay_posture,
         materialized_count,
         target_count,
@@ -1175,7 +1191,7 @@ fn logging_dashboard_projection(
     });
     let projection = json!({
         "requestId": request_id,
-        "channelId": "logging.dashboard",
+        "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD,
         "service": "logging",
         "servicePk": state.service_identity.service_pk,
         "producer": {
@@ -1414,7 +1430,7 @@ fn logging_projection_materialization_budget(
             "maxLabelValues": 250
         }),
         snapshot_policy: json!({ "mode": "safeProjection", "owner": "logging.service" }),
-        delta_policy: json!({ "mode": "projection.delta", "baseRevision": "required" }),
+        delta_policy: json!({ "mode": constitute_protocol::RECORD_PROJECTION_DELTA, "baseRevision": "required" }),
         coalescing: json!({ "key": "eventId", "duplicatePolicy": "replaceLatest" }),
         cardinality: replay_posture
             .get("cardinality")
@@ -1906,7 +1922,7 @@ fn projection_affected_records(projection: &Value) -> Vec<Value> {
         .get("channelId")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
-    if channel_id == "logging.events" {
+    if channel_id == constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS {
         return projection
             .get("payload")
             .and_then(|payload| payload.get("events"))
@@ -2702,13 +2718,13 @@ mod tests {
             expires_at: None,
             nonce: "nonce-logging-edge-event".to_string(),
             correlation_id: Some("corr-logging-edge-event".to_string()),
-            channel_id: Some("logging.events".to_string()),
+            channel_id: Some(constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS.to_string()),
             record_ref: Some(SwarmRecordRef {
                 kind: "logging.event".to_string(),
                 id: event.event_id.clone(),
                 revision: Some(1),
             }),
-            capability: Some("logging.events.ingest".to_string()),
+            capability: Some(constitute_protocol::CAPABILITY_LOGGING_EVENTS_INGEST.to_string()),
             body: SwarmFrameBody {
                 encoding: "caac".to_string(),
                 envelope: Some(json!({
@@ -2751,7 +2767,7 @@ mod tests {
             correlation_id: Some(format!("corr-logging-observe-{channel_id}")),
             channel_id: Some(channel_id.to_string()),
             record_ref: Some(SwarmRecordRef {
-                kind: "projection.snapshot".to_string(),
+                kind: constitute_protocol::RECORD_PROJECTION_SNAPSHOT.to_string(),
                 id: channel_id.to_string(),
                 revision: None,
             }),
@@ -2813,13 +2829,13 @@ mod tests {
             expires_at: Some(now + 60_000),
             nonce: "nonce-logging-real-caac-event".to_string(),
             correlation_id: Some("corr-logging-real-caac-event".to_string()),
-            channel_id: Some("logging.events".to_string()),
+            channel_id: Some(constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS.to_string()),
             record_ref: Some(SwarmRecordRef {
                 kind: "logging.event".to_string(),
                 id: "edge-event".to_string(),
                 revision: Some(1),
             }),
-            capability: Some("logging.events.ingest".to_string()),
+            capability: Some(constitute_protocol::CAPABILITY_LOGGING_EVENTS_INGEST.to_string()),
             body: SwarmFrameBody {
                 encoding: "caac".to_string(),
                 envelope: Some(serde_json::to_value(envelope).expect("envelope json")),
@@ -2845,16 +2861,16 @@ mod tests {
                 "method": "runtime.diagnostics.log",
                 "signalType": "intent",
                 "activation": {
-                    "kind": "runtime.activation.request",
+                    "kind": constitute_protocol::RECORD_RUNTIME_ACTIVATION_REQUEST,
                     "activationId": "diag-runtime-event",
                     "nodeRef": "runtime.diagnostics",
-                    "capabilityRef": "logging.events.ingest"
+                    "capabilityRef": constitute_protocol::CAPABILITY_LOGGING_EVENTS_INGEST
                 },
                 "record": {
-                    "kind": "runtime.activation.request",
+                    "kind": constitute_protocol::RECORD_RUNTIME_ACTIVATION_REQUEST,
                     "activationId": "diag-runtime-event",
                     "nodeRef": "runtime.diagnostics",
-                    "capabilityRef": "logging.events.ingest"
+                    "capabilityRef": constitute_protocol::CAPABILITY_LOGGING_EVENTS_INGEST
                 },
                 "payload": {
                     "recordKind": "logging.event",
@@ -2884,13 +2900,13 @@ mod tests {
             expires_at: Some(now + 60_000),
             nonce: "nonce-runtime-diagnostic-log".to_string(),
             correlation_id: Some("runtime-diagnostic-correlation".to_string()),
-            channel_id: Some("logging.events".to_string()),
+            channel_id: Some(constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS.to_string()),
             record_ref: Some(SwarmRecordRef {
                 kind: "logging.event".to_string(),
                 id: event.event_id.clone(),
                 revision: Some(1),
             }),
-            capability: Some("logging.events.ingest".to_string()),
+            capability: Some(constitute_protocol::CAPABILITY_LOGGING_EVENTS_INGEST.to_string()),
             body: SwarmFrameBody {
                 encoding: "caac".to_string(),
                 envelope: Some(serde_json::to_value(envelope).expect("envelope json")),
@@ -2915,7 +2931,10 @@ mod tests {
 
         assert_eq!(response["status"], "accepted");
         assert_eq!(response["accepted"], 1);
-        assert_eq!(response["channelId"], "logging.events");
+        assert_eq!(
+            response["channelId"],
+            constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS
+        );
         let delta: SwarmProjectionDelta =
             serde_json::from_value(response["projectionDelta"].clone()).expect("delta");
         validate_projection_delta(&delta, 2).expect("valid edge projection delta");
@@ -2979,9 +2998,9 @@ mod tests {
             trace_id: None,
         });
         event.safe_facts = json!({
-            "kind": "route.observation",
-            "capabilityRef": "logging.events.ingest",
-            "channelRef": "logging.events",
+            "kind": constitute_protocol::RECORD_ROUTE_OBSERVATION,
+            "capabilityRef": constitute_protocol::CAPABILITY_LOGGING_EVENTS_INGEST,
+            "channelRef": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
             "correlationId": "diag-runtime"
         });
         event.event_id = log_event_id(&event).expect("event id");
@@ -3003,7 +3022,7 @@ mod tests {
         assert_eq!(found.events[0].event_id, event.event_id);
         assert_eq!(
             found.events[0].safe_facts["capabilityRef"],
-            "logging.events.ingest"
+            constitute_protocol::CAPABILITY_LOGGING_EVENTS_INGEST
         );
     }
 
@@ -3018,13 +3037,16 @@ mod tests {
 
         assert_eq!(emitted.len(), 1);
         assert_eq!(emitted[0].kind, SwarmFrameKind::ProjectionDelta);
-        assert_eq!(emitted[0].channel_id.as_deref(), Some("logging.events"));
+        assert_eq!(
+            emitted[0].channel_id.as_deref(),
+            Some(constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS)
+        );
         assert_eq!(
             emitted[0]
                 .record_ref
                 .as_ref()
                 .map(|record| record.kind.as_str()),
-            Some("projection.delta")
+            Some(constitute_protocol::RECORD_PROJECTION_DELTA)
         );
         validate_swarm_frame(&emitted[0], 1_700_000_000_001).expect("valid emitted frame");
 
@@ -3046,7 +3068,7 @@ mod tests {
         let mut frame = logging_event_frame(event);
         frame.channel_id = Some("swarm.route".to_string());
         frame.record_ref = Some(SwarmRecordRef {
-            kind: "route.observation".to_string(),
+            kind: constitute_protocol::RECORD_ROUTE_OBSERVATION.to_string(),
             id: "route-observation".to_string(),
             revision: Some(1),
         });
@@ -3076,20 +3098,25 @@ mod tests {
             .await
             .expect("seed event");
 
-        let observe_frame = logging_projection_observe_frame("logging.dashboard");
+        let observe_frame = logging_projection_observe_frame(
+            constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD,
+        );
         let emitted = process_gateway_frame(&state.state, observe_frame, 1_700_000_000_100)
             .await
             .expect("projection observe frame");
 
         assert_eq!(emitted.len(), 1);
         assert_eq!(emitted[0].kind, SwarmFrameKind::ProjectionSnapshot);
-        assert_eq!(emitted[0].channel_id.as_deref(), Some("logging.dashboard"));
+        assert_eq!(
+            emitted[0].channel_id.as_deref(),
+            Some(constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD)
+        );
         assert_eq!(
             emitted[0]
                 .record_ref
                 .as_ref()
                 .map(|record| record.kind.as_str()),
-            Some("projection.snapshot")
+            Some(constitute_protocol::RECORD_PROJECTION_SNAPSHOT)
         );
         validate_swarm_frame(&emitted[0], 1_700_000_000_101).expect("valid snapshot frame");
     }
@@ -3121,13 +3148,16 @@ mod tests {
         assert_eq!(emitted.len(), 3);
         assert_eq!(emitted[0].kind, SwarmFrameKind::ProjectionDelta);
         assert_eq!(emitted[1].kind, SwarmFrameKind::StoragePinIntent);
-        assert_eq!(emitted[1].channel_id.as_deref(), Some("storage.pin.intent"));
+        assert_eq!(
+            emitted[1].channel_id.as_deref(),
+            Some(constitute_protocol::RECORD_STORAGE_PIN_INTENT)
+        );
         assert_eq!(
             emitted[1]
                 .record_ref
                 .as_ref()
                 .map(|record| record.kind.as_str()),
-            Some("storage.pin.intent")
+            Some(constitute_protocol::RECORD_STORAGE_PIN_INTENT)
         );
         validate_swarm_frame(&emitted[1], 1_700_000_000_001).expect("valid storage pin frame");
         assert_eq!(emitted[2].kind, SwarmFrameKind::StoragePinIntent);
@@ -3170,7 +3200,7 @@ mod tests {
             &state,
             &json!({
                 "requestId": "projection-test",
-                "channelId": "logging.events",
+                "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
                 "limit": 10,
                 "filters": {}
             }),
@@ -3178,7 +3208,10 @@ mod tests {
             1_700_000_000,
         )
         .expect("projection");
-        assert_eq!(projection["channelId"], "logging.events");
+        assert_eq!(
+            projection["channelId"],
+            constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS
+        );
         assert_eq!(projection["service"], "logging");
         assert_eq!(projection["servicePk"], state.service_identity.service_pk);
         assert!(
@@ -3190,7 +3223,7 @@ mod tests {
         assert_eq!(projection["safeFacts"]["eventCount"], 0);
         assert_eq!(
             projection["materializationBudget"]["kind"],
-            "materialization.budget"
+            constitute_protocol::RECORD_MATERIALIZATION_BUDGET
         );
         assert_eq!(
             projection["materializationBudget"]["payloadClass"],
@@ -3202,7 +3235,7 @@ mod tests {
         );
         assert_eq!(
             projection["materializationBudget"]["consumerFloor"]["kind"],
-            "consumer.floor"
+            constitute_protocol::RECORD_CONSUMER_FLOOR
         );
         assert_eq!(projection["replayPosture"]["schema"]["state"], "current");
         assert_eq!(
@@ -3221,7 +3254,7 @@ mod tests {
             &state,
             &json!({
                 "requestId": "projection-delta-events",
-                "channelId": "logging.events",
+                "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
                 "baseRevision": 7,
                 "filters": {}
             }),
@@ -3249,7 +3282,7 @@ mod tests {
             &state,
             &json!({
                 "requestId": "projection-dashboard",
-                "channelId": "logging.dashboard",
+                "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD,
                 "baseRevision": 3
             }),
             "projection-dashboard".to_string(),
@@ -3370,11 +3403,11 @@ mod tests {
             &state,
             &json!({
                 "requestId": "projection-first",
-                "channelId": "logging.events",
+                "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
                 "filters": {},
                 "policy": {
                     "policyId": "logging.default.72h.low",
-                    "channelId": "logging.events",
+                    "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
                     "service": "logging",
                     "rollingWindowHours": 72,
                     "maxVerbosityClass": "normal",
@@ -3433,11 +3466,11 @@ mod tests {
             &state,
             &json!({
                 "requestId": "projection-noise",
-                "channelId": "logging.events",
+                "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
                 "filters": {},
                 "policy": {
                     "policyId": "logging.default.72h.low",
-                    "channelId": "logging.events",
+                    "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
                     "service": "logging",
                     "rollingWindowHours": 72,
                     "maxVerbosityClass": "normal",
@@ -3473,7 +3506,10 @@ mod tests {
         let projection =
             logging_health_projection(&state, "projection-health".to_string(), 0, 1_700_000_000)
                 .expect("projection");
-        assert_eq!(projection["channelId"], "logging.health");
+        assert_eq!(
+            projection["channelId"],
+            constitute_protocol::PROJECTION_CHANNEL_LOGGING_HEALTH
+        );
         assert_eq!(projection["service"], "logging");
         assert_eq!(projection["payload"]["health"]["status"], "ok");
         assert_eq!(projection["safeFacts"]["storageStatus"], "not_configured");
@@ -3509,13 +3545,16 @@ mod tests {
             &state,
             &json!({
                 "requestId": "projection-dashboard",
-                "channelId": "logging.dashboard"
+                "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD
             }),
             "projection-dashboard".to_string(),
             1_700_000_010,
         )
         .expect("projection");
-        assert_eq!(projection["channelId"], "logging.dashboard");
+        assert_eq!(
+            projection["channelId"],
+            constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD
+        );
         assert_eq!(projection["payload"]["severityCounts"]["critical"], 1);
         assert_eq!(
             projection["payload"]["criticalShortlist"]
@@ -3582,7 +3621,10 @@ mod tests {
             Some("caughtUp")
         );
         let profile = &projection["payload"]["evidenceProfiles"][0];
-        assert_eq!(profile["kind"], "logging.evidence.profile");
+        assert_eq!(
+            profile["kind"],
+            constitute_protocol::LOG_EVIDENCE_PROFILE_KIND
+        );
         assert_eq!(profile["consumerRef"], "constitute-cybersec");
         assert_eq!(profile["detailCustody"], "encryptedDetailRef");
         assert_eq!(
@@ -3596,11 +3638,11 @@ mod tests {
         assert_eq!(projection["safeFacts"]["eventFabricProcessorContracts"], 1);
         assert_eq!(
             projection["materializationBudget"]["kind"],
-            "materialization.budget"
+            constitute_protocol::RECORD_MATERIALIZATION_BUDGET
         );
         assert_eq!(
             projection["replayPosture"]["consumerFloor"]["kind"],
-            "consumer.floor"
+            constitute_protocol::RECORD_CONSUMER_FLOOR
         );
         let budget: MaterializationBudget =
             serde_json::from_value(projection["materializationBudget"].clone()).expect("budget");
