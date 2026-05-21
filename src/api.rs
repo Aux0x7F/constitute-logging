@@ -1,3 +1,4 @@
+// domain-owned-vocabulary: logging.cybersec.default logging.cybersec.default.90d logging.cybersec.evidence.v1 logging.dashboard.cybersecSummary logging.dashboard.observe logging.dashboard.processor logging.default.72h.low logging.event logging.events.encryptedDetail logging.events.safeIndex logging.health.observe logging.projection logging.service logging.settings logging.surface logging.surface.observe logging.unknown runtime.diagnostics runtime.diagnostics.log runtime.projection.store service.projection.request service.projection.response swarm.route
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::http::StatusCode;
@@ -8,22 +9,20 @@ use constitute_protocol::{
     AccessEpochRecord, AccessGroupRecord, CAPABILITY_PROJECTION_DELTA_APPLY,
     CAPABILITY_PROJECTION_OBSERVE, CaacEnvelope, ConsumerFloor, EncryptedDetailRef,
     EventFabricAccessClassRecord, EventFabricProcessorContractRecord,
-    LOG_EVIDENCE_DETAIL_CUSTODY_ENCRYPTED_DETAIL_REF, LOG_EVIDENCE_PROFILE_EVENT_MEDIA_PATH,
-    LOG_EVIDENCE_PROFILE_EVENT_RUNTIME_DIAGNOSTIC, LOG_EVIDENCE_PROFILE_EVENT_SECURITY_AUDIT,
+    LOG_EVIDENCE_DETAIL_CUSTODY_ENCRYPTED_DETAIL_REF, LOG_EVIDENCE_PROFILE_EVENT_CYBERSEC_AUDIT,
+    LOG_EVIDENCE_PROFILE_EVENT_MEDIA_PATH, LOG_EVIDENCE_PROFILE_EVENT_RUNTIME_DIAGNOSTIC,
     LOG_EVIDENCE_PROFILE_EVENT_SERVICE_EVENT, LOG_EVIDENCE_PROFILE_EVENT_STORAGE_ACCESS,
     LOG_EVIDENCE_PROFILE_KIND, LogCategory, LogEventEnvelope, LogEvidenceProfile, LogOutcome,
     LogSeverity, MaterializationBudget, MaterializationSchemaPosture, ProjectionDeltaOp,
     ProjectionDeltaOpKind, ProjectionPathSegment, RECORD_ACCESS_EPOCH, RECORD_ACCESS_GROUP,
     RECORD_CONSUMER_FLOOR, RECORD_EVENT_FABRIC_ACCESS_CLASS,
-    RECORD_EVENT_FABRIC_PROCESSOR_CONTRACT, RECORD_MATERIALIZATION_BUDGET,
-    RECORD_SECURITY_PROCESSOR_SEED, SWARM_FRAME_VERSION, SecurityProcessorSeedRecord,
+    RECORD_EVENT_FABRIC_PROCESSOR_CONTRACT, RECORD_MATERIALIZATION_BUDGET, SWARM_FRAME_VERSION,
     StoragePinIntent, SwarmFrame, SwarmFrameBody, SwarmFrameKind, SwarmProjectionDelta,
     SwarmProjectionSnapshot, SwarmRecordRef, ZoneScope, open_envelope, seal_envelope, sha256_hex,
     swarm_frame_id, validate_access_epoch, validate_access_group, validate_consumer_floor,
     validate_event_fabric_access_class, validate_event_fabric_processor_contract,
     validate_log_evidence_profile, validate_materialization_budget, validate_projection_delta,
-    validate_projection_snapshot, validate_security_processor_seed, validate_storage_pin_intent,
-    validate_swarm_frame,
+    validate_projection_snapshot, validate_storage_pin_intent, validate_swarm_frame,
 };
 use reqwest::Client;
 use serde::Deserialize;
@@ -42,15 +41,15 @@ use crate::types::{
 
 pub(crate) const LOGGING_CHANNELS: [&str; 4] = [
     "logging.surface",
-    "logging.events",
-    "logging.health",
-    "logging.dashboard",
+    constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
+    constitute_protocol::PROJECTION_CHANNEL_LOGGING_HEALTH,
+    constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD,
 ];
 
 pub(crate) const LOGGING_EDGE_CAPABILITIES: [&str; 6] = [
     CAPABILITY_PROJECTION_OBSERVE,
-    "logging.events.ingest",
-    "logging.events.observe",
+    constitute_protocol::CAPABILITY_LOGGING_EVENTS_INGEST,
+    constitute_protocol::CAPABILITY_LOGGING_EVENTS_OBSERVE,
     "logging.health.observe",
     "logging.dashboard.observe",
     "logging.surface.observe",
@@ -146,22 +145,22 @@ async fn hosted_service_manifest(State(state): State<ApiState>) -> impl IntoResp
         "channels": [
             {
                 "channelId": "logging.surface",
-                "recordKinds": ["projection.delta"],
+                "recordKinds": [constitute_protocol::RECORD_PROJECTION_DELTA],
                 "capabilities": ["logging.surface.observe"]
             },
             {
-                "channelId": "logging.events",
-                "recordKinds": ["logging.event", "projection.delta"],
-                "capabilities": ["logging.events.ingest", "logging.events.observe"]
+                "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
+                "recordKinds": ["logging.event", constitute_protocol::RECORD_PROJECTION_DELTA],
+                "capabilities": [constitute_protocol::CAPABILITY_LOGGING_EVENTS_INGEST, constitute_protocol::CAPABILITY_LOGGING_EVENTS_OBSERVE]
             },
             {
-                "channelId": "logging.health",
-                "recordKinds": ["projection.delta"],
+                "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_HEALTH,
+                "recordKinds": [constitute_protocol::RECORD_PROJECTION_DELTA],
                 "capabilities": ["logging.health.observe"]
             },
             {
-                "channelId": "logging.dashboard",
-                "recordKinds": ["projection.delta"],
+                "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD,
+                "recordKinds": [constitute_protocol::RECORD_PROJECTION_DELTA],
                 "capabilities": ["logging.dashboard.observe"]
             }
         ],
@@ -209,7 +208,7 @@ async fn ingest_edge_frame_at(
         .unwrap_or_default()
         .trim()
         .to_string();
-    if channel_id != "logging.events" {
+    if channel_id != constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS {
         return Err(anyhow::anyhow!("logging edge frame targets unsupported channel").into());
     }
     if frame
@@ -240,7 +239,7 @@ async fn ingest_edge_frame_at(
         .unwrap_or_else(|| frame.frame_id.clone());
     let projection_payload = json!({
         "requestId": request_id,
-        "channelId": "logging.events",
+        "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
         "baseRevision": projection_base_revision(&payload),
         "limit": 2500,
         "filters": payload.get("filters").cloned().unwrap_or_else(|| json!({}))
@@ -254,7 +253,7 @@ async fn ingest_edge_frame_at(
     Ok(json!({
         "status": "accepted",
         "frameId": frame.frame_id,
-        "channelId": "logging.events",
+        "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
         "accepted": ingest.accepted,
         "duplicate": ingest.duplicate,
         "cursor": ingest.cursor,
@@ -368,14 +367,16 @@ async fn observe_edge_frame_at(
         "logging.surface" => {
             logging_surface_projection(state, &host_gateway_pk, request_id, now_seconds)
         }
-        "logging.events" => logging_events_projection(state, &payload, request_id, now_seconds),
-        "logging.health" => logging_health_projection(
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS => {
+            logging_events_projection(state, &payload, request_id, now_seconds)
+        }
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_HEALTH => logging_health_projection(
             state,
             request_id,
             projection_base_revision(&payload),
             now_seconds,
         ),
-        "logging.dashboard" => {
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD => {
             logging_dashboard_projection(state, &payload, request_id, now_seconds)
         }
         _ => Err(anyhow::anyhow!("unsupported logging projection channel").into()),
@@ -430,7 +431,8 @@ pub async fn process_gateway_frame(
 fn is_route_observation_frame(frame: &SwarmFrame) -> bool {
     frame.kind == SwarmFrameKind::RecordPublish
         && frame.channel_id.as_deref() == Some("swarm.route")
-        && frame.record_ref.as_ref().map(|record| record.kind.as_str()) == Some("route.observation")
+        && frame.record_ref.as_ref().map(|record| record.kind.as_str())
+            == Some(constitute_protocol::RECORD_ROUTE_OBSERVATION)
 }
 
 fn projection_delta_response_frame(
@@ -447,7 +449,7 @@ fn projection_delta_response_frame(
     let channel_id = source_frame
         .channel_id
         .clone()
-        .unwrap_or_else(|| "logging.events".to_string());
+        .unwrap_or_else(|| constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS.to_string());
     let mut frame = SwarmFrame {
         version: SWARM_FRAME_VERSION,
         frame_id: String::new(),
@@ -461,7 +463,7 @@ fn projection_delta_response_frame(
         correlation_id: Some(source_frame.frame_id.clone()),
         channel_id: Some(channel_id),
         record_ref: Some(SwarmRecordRef {
-            kind: "projection.delta".to_string(),
+            kind: constitute_protocol::RECORD_PROJECTION_DELTA.to_string(),
             id: projection_id.to_string(),
             revision: delta.get("revision").and_then(Value::as_u64),
         }),
@@ -471,9 +473,9 @@ fn projection_delta_response_frame(
             envelope: seal_frame_payload(
                 &state.service_identity,
                 source_frame,
-                "projection.delta",
+                constitute_protocol::RECORD_PROJECTION_DELTA,
                 json!({
-                    "recordKind": "projection.delta",
+                    "recordKind": constitute_protocol::RECORD_PROJECTION_DELTA,
                     "delta": delta,
                 }),
                 now,
@@ -511,7 +513,7 @@ fn projection_snapshot_response_frame(
         correlation_id: Some(source_frame.frame_id.clone()),
         channel_id: source_frame.channel_id.clone(),
         record_ref: Some(SwarmRecordRef {
-            kind: "projection.snapshot".to_string(),
+            kind: constitute_protocol::RECORD_PROJECTION_SNAPSHOT.to_string(),
             id: snapshot.projection_id.clone(),
             revision: Some(snapshot.revision),
         }),
@@ -521,9 +523,9 @@ fn projection_snapshot_response_frame(
             envelope: seal_frame_payload(
                 &state.service_identity,
                 source_frame,
-                "projection.snapshot",
+                constitute_protocol::RECORD_PROJECTION_SNAPSHOT,
                 json!({
-                    "recordKind": "projection.snapshot",
+                    "recordKind": constitute_protocol::RECORD_PROJECTION_SNAPSHOT,
                     "snapshot": snapshot,
                 }),
                 now,
@@ -550,25 +552,25 @@ fn storage_pin_intent_frame(
         frame_id: String::new(),
         kind: SwarmFrameKind::StoragePinIntent,
         issuer: format!("service:logging:{}", state.service_identity.service_pk),
-        audience: json!({ "capability": "storage.pin" }),
+        audience: json!({ "capability": constitute_protocol::CAPABILITY_STORAGE_PIN }),
         zone_scope: source_frame.zone_scope.clone().or_else(default_zone_scope),
         issued_at: now,
         expires_at: Some(now + 60_000),
         nonce: format!("logging-storage-pin-{now}-{}", intent.intent_id),
         correlation_id: Some(source_frame.frame_id.clone()),
-        channel_id: Some("storage.pin.intent".to_string()),
+        channel_id: Some(constitute_protocol::RECORD_STORAGE_PIN_INTENT.to_string()),
         record_ref: Some(SwarmRecordRef {
-            kind: "storage.pin.intent".to_string(),
+            kind: constitute_protocol::RECORD_STORAGE_PIN_INTENT.to_string(),
             id: intent.intent_id.clone(),
             revision: Some(1),
         }),
-        capability: Some("storage.pin".to_string()),
+        capability: Some(constitute_protocol::CAPABILITY_STORAGE_PIN.to_string()),
         body: SwarmFrameBody {
             encoding: "caac".to_string(),
             envelope: seal_frame_record(
                 &state.service_identity,
                 source_frame,
-                "storage.pin.intent",
+                constitute_protocol::RECORD_STORAGE_PIN_INTENT,
                 serde_json::to_value(intent).unwrap_or_else(|_| json!({})),
                 now,
             ),
@@ -747,11 +749,15 @@ async fn projection_adapter(
     let now = now_seconds();
     let projection = match channel_id.as_str() {
         "logging.surface" => logging_surface_projection(&state, &host_gateway_pk, request_id, now)?,
-        "logging.events" => logging_events_projection(&state, &payload, request_id, now)?,
-        "logging.health" => {
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS => {
+            logging_events_projection(&state, &payload, request_id, now)?
+        }
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_HEALTH => {
             logging_health_projection(&state, request_id, projection_base_revision(&payload), now)?
         }
-        "logging.dashboard" => logging_dashboard_projection(&state, &payload, request_id, now)?,
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD => {
+            logging_dashboard_projection(&state, &payload, request_id, now)?
+        }
         _ => return Err(anyhow::anyhow!("unsupported logging projection channel").into()),
     };
     Ok(Json(json!({
@@ -788,11 +794,11 @@ fn logging_surface_projection(
         "updatedAt": now,
         "nodes": [
             {
-                "nodeId": "logging.events",
+                "nodeId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
                 "path": "events",
                 "label": "Events",
                 "description": "Policy-materialized safe event stream.",
-                "backingChannel": "logging.events",
+                "backingChannel": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
                 "fields": [
                     {
                         "fieldId": "events",
@@ -809,11 +815,11 @@ fn logging_surface_projection(
                 ]
             },
             {
-                "nodeId": "logging.health",
+                "nodeId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_HEALTH,
                 "path": "health",
                 "label": "Health",
                 "description": "Logging service health and storage attachment state.",
-                "backingChannel": "logging.health",
+                "backingChannel": constitute_protocol::PROJECTION_CHANNEL_LOGGING_HEALTH,
                 "fields": [
                     {
                         "fieldId": "status",
@@ -830,11 +836,11 @@ fn logging_surface_projection(
                 ]
             },
             {
-                "nodeId": "logging.dashboard",
+                "nodeId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD,
                 "path": "dashboard",
                 "label": "Dashboard",
                 "description": "Reduced severity counts, critical shortlist, and coverage.",
-                "backingChannel": "logging.dashboard",
+                "backingChannel": constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD,
                 "fields": [
                     {
                         "fieldId": "severityCounts",
@@ -855,7 +861,7 @@ fn logging_surface_projection(
                 "path": "settings",
                 "label": "Settings",
                 "description": "Requested sync/retention policy knobs.",
-                "backingChannel": "logging.events",
+                "backingChannel": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
                 "fields": [
                     {
                         "fieldId": "rollingWindowHours",
@@ -921,7 +927,11 @@ fn logging_events_projection(
         .cloned()
         .filter(|value| value.is_object())
         .unwrap_or_else(|| json!({}));
-    let policy = projection_policy(payload, "logging.events", now);
+    let policy = projection_policy(
+        payload,
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
+        now,
+    );
     let mut query: EventSearchQuery = serde_json::from_value(filters.clone()).unwrap_or_default();
     apply_policy_to_query(&policy, &mut query, now);
     let limit = payload
@@ -977,7 +987,7 @@ fn logging_events_projection(
         .unwrap_or_else(|| format!("empty-{now}"));
     let replay_posture = logging_projection_replay_posture(
         state,
-        "logging.events",
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
         &policy_event_refs,
         materialized_count,
         target_count,
@@ -986,7 +996,7 @@ fn logging_events_projection(
     )?;
     let materialization_budget = logging_projection_materialization_budget(
         state,
-        "logging.events",
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
         &replay_posture,
         materialized_count,
         target_count,
@@ -995,7 +1005,7 @@ fn logging_events_projection(
     )?;
     let projection = json!({
         "requestId": request_id,
-        "channelId": "logging.events",
+        "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
         "service": "logging",
         "servicePk": state.service_identity.service_pk,
         "producer": {
@@ -1058,7 +1068,7 @@ fn logging_health_projection(
     let health = state.engine.health(storage_status)?;
     let projection = json!({
         "requestId": request_id,
-        "channelId": "logging.health",
+        "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_HEALTH,
         "service": "logging",
         "servicePk": state.service_identity.service_pk,
         "producer": {
@@ -1098,7 +1108,11 @@ fn logging_dashboard_projection(
     now: u64,
 ) -> Result<Value, ApiError> {
     let base_revision = projection_base_revision(payload);
-    let policy = projection_policy(payload, "logging.dashboard", now);
+    let policy = projection_policy(
+        payload,
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD,
+        now,
+    );
     let mut query = EventSearchQuery::default();
     apply_policy_to_query(&policy, &mut query, now);
     query.limit = Some(5000);
@@ -1137,14 +1151,14 @@ fn logging_dashboard_projection(
     } else {
         "not_configured"
     })?;
-    let evidence_profile = security_evidence_profile(state, now)?;
-    let security_budget = logging_security_evidence_materialization_budget(state, now)?;
-    let security_access_group = logging_security_access_group(state, now)?;
-    let security_access_epoch = logging_security_access_epoch(state, now)?;
+    let evidence_profile = cybersec_evidence_profile(state, now)?;
+    let cybersec_budget = logging_cybersec_evidence_materialization_budget(state, now)?;
+    let cybersec_access_group = logging_cybersec_access_group(state, now)?;
+    let cybersec_access_epoch = logging_cybersec_access_epoch(state, now)?;
     let event_fabric_access_classes = logging_event_fabric_access_classes(state, now)?;
     let replay_posture = logging_projection_replay_posture(
         state,
-        "logging.dashboard",
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD,
         &policy_event_refs,
         materialized_count,
         target_count,
@@ -1153,7 +1167,7 @@ fn logging_dashboard_projection(
     )?;
     let materialization_budget = logging_projection_materialization_budget(
         state,
-        "logging.dashboard",
+        constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD,
         &replay_posture,
         materialized_count,
         target_count,
@@ -1165,15 +1179,6 @@ fn logging_dashboard_projection(
         now,
         &event_fabric_access_classes,
         &materialization_budget,
-        &security_budget,
-    )?;
-    let security_processor_seed = logging_security_processor_seed(
-        state,
-        now,
-        &event_fabric_access_classes,
-        &event_fabric_processor_contracts,
-        &evidence_profile,
-        &security_budget,
     )?;
     let coverage = json!({
         "materializedCount": materialized_count,
@@ -1186,7 +1191,7 @@ fn logging_dashboard_projection(
     });
     let projection = json!({
         "requestId": request_id,
-        "channelId": "logging.dashboard",
+        "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD,
         "service": "logging",
         "servicePk": state.service_identity.service_pk,
         "producer": {
@@ -1218,8 +1223,8 @@ fn logging_dashboard_projection(
                 "archiveContainerId": health.archive_container_id
             },
             "eventFabric": {
-                "accessGroups": [serde_json::to_value(security_access_group.clone()).map_err(anyhow::Error::from)?],
-                "accessEpochs": [serde_json::to_value(security_access_epoch.clone()).map_err(anyhow::Error::from)?],
+                "accessGroups": [serde_json::to_value(cybersec_access_group.clone()).map_err(anyhow::Error::from)?],
+                "accessEpochs": [serde_json::to_value(cybersec_access_epoch.clone()).map_err(anyhow::Error::from)?],
                 "accessClasses": event_fabric_access_classes
                     .iter()
                     .map(serde_json::to_value)
@@ -1230,13 +1235,11 @@ fn logging_dashboard_projection(
                     .map(serde_json::to_value)
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(anyhow::Error::from)?,
-                "securityProcessorSeeds": [serde_json::to_value(security_processor_seed.clone()).map_err(anyhow::Error::from)?],
-                "processorRoles": ["role:logging.processor", "role:security.processor"],
-                "contentClasses": security_access_group.content_classes,
-                "currentEpochId": security_access_epoch.epoch_id
+                "contentClasses": cybersec_access_group.content_classes,
+                "currentEpochId": cybersec_access_epoch.epoch_id
             },
             "evidenceProfiles": [serde_json::to_value(evidence_profile).map_err(anyhow::Error::from)?],
-            "evidenceMaterializationBudgets": [serde_json::to_value(security_budget).map_err(anyhow::Error::from)?],
+            "evidenceMaterializationBudgets": [serde_json::to_value(cybersec_budget).map_err(anyhow::Error::from)?],
             "replayPosture": replay_posture,
             "materializationBudget": materialization_budget
         },
@@ -1248,12 +1251,11 @@ fn logging_dashboard_projection(
             "warning": warning_count,
             "info": info_count,
             "targetCount": target_count,
-            "securityEvidenceProfiles": 1,
-            "securityMaterializationBudgets": 1,
+            "cybersecEvidenceProfiles": 1,
+            "cybersecMaterializationBudgets": 1,
             "eventFabricAccessGroups": 1,
             "eventFabricAccessClasses": event_fabric_access_classes.len(),
             "eventFabricProcessorContracts": event_fabric_processor_contracts.len(),
-            "securityProcessorSeeds": 1,
             "replayState": replay_posture.get("state").cloned().unwrap_or_else(|| json!("unknown"))
         },
         "encryptedDetailRefs": [],
@@ -1428,7 +1430,7 @@ fn logging_projection_materialization_budget(
             "maxLabelValues": 250
         }),
         snapshot_policy: json!({ "mode": "safeProjection", "owner": "logging.service" }),
-        delta_policy: json!({ "mode": "projection.delta", "baseRevision": "required" }),
+        delta_policy: json!({ "mode": constitute_protocol::RECORD_PROJECTION_DELTA, "baseRevision": "required" }),
         coalescing: json!({ "key": "eventId", "duplicatePolicy": "replaceLatest" }),
         cardinality: replay_posture
             .get("cardinality")
@@ -1462,29 +1464,29 @@ fn logging_projection_materialization_budget(
     Ok(budget)
 }
 
-fn logging_security_evidence_materialization_budget(
+fn logging_cybersec_evidence_materialization_budget(
     state: &ApiState,
     now: u64,
 ) -> Result<MaterializationBudget, ApiError> {
-    let materialization_id = "logging.security.default.90d".to_string();
+    let materialization_id = "logging.cybersec.default.90d".to_string();
     let floor = ConsumerFloor {
         kind: Some(RECORD_CONSUMER_FLOOR.to_string()),
         floor_id: format!("floor:{materialization_id}"),
-        consumer_ref: "constitute-security".to_string(),
+        consumer_ref: "constitute-cybersec".to_string(),
         subscription_id: None,
         materialization_id: Some(materialization_id.clone()),
         subject_ref: Some("logging.events.encryptedDetail".to_string()),
         cursor: Some(state.engine.archive_container_id()),
         ack_floor: Some("storage-container-ref".to_string()),
-        witness_floor: Some("security-profile".to_string()),
+        witness_floor: Some("cybersec-profile".to_string()),
         compaction_floor: Some("retention-window:90d".to_string()),
         event_time_floor: None,
         observed_time_floor: Some(now),
         lag_state: "unknown".to_string(),
         reason: None,
         redelivery: json!({ "mode": "authorized-read", "duplicatePolicy": "objectRef" }),
-        replay: json!({ "mode": "security-query", "retentionWindow": "90d" }),
-        evidence_refs: vec!["logging.security.default".to_string()],
+        replay: json!({ "mode": "cybersec-query", "retentionWindow": "90d" }),
+        evidence_refs: vec!["logging.cybersec.default".to_string()],
         sampled_at: now,
         expires_at: Some(now + 24 * 60 * 60),
     };
@@ -1493,7 +1495,7 @@ fn logging_security_evidence_materialization_budget(
         kind: Some(RECORD_MATERIALIZATION_BUDGET.to_string()),
         budget_id: materialization_id,
         source_authority: format!("service:logging:{}", state.service_identity.service_pk),
-        consumer_ref: "constitute-security".to_string(),
+        consumer_ref: "constitute-cybersec".to_string(),
         subscriber_ref: None,
         payload_class: "retainedRaw".to_string(),
         copy_role: "retention".to_string(),
@@ -1503,7 +1505,7 @@ fn logging_security_evidence_materialization_budget(
         limits: json!({
             "retentionWindow": "90d",
             "detailCustody": "encryptedDetailRef",
-            "safeIndexRefs": ["logging.events.safeIndex", "logging.dashboard.securitySummary"]
+            "safeIndexRefs": ["logging.events.safeIndex", "logging.dashboard.cybersecSummary"]
         }),
         snapshot_policy: json!({ "mode": "encrypted-detail-refs-only" }),
         delta_policy: json!({ "mode": "storage-pin-intent" }),
@@ -1511,14 +1513,14 @@ fn logging_security_evidence_materialization_budget(
         cardinality: json!({ "rawDetail": "byObjectRef", "safeFacts": "indexedSummary" }),
         schema: Some(MaterializationSchemaPosture {
             state: "current".to_string(),
-            version: Some("logging.security.evidence.v1".to_string()),
+            version: Some("logging.cybersec.evidence.v1".to_string()),
             reason: None,
             migration_refs: Vec::new(),
         }),
         consumer_floor: Some(floor),
         reference_refs: vec![state.engine.archive_container_id()],
         blocked_reasons: Vec::new(),
-        evidence_refs: vec!["logging.security.default".to_string()],
+        evidence_refs: vec!["logging.cybersec.default".to_string()],
         retention_class: Some("long.security-evidence".to_string()),
         issued_at: now,
         release_after: Some(now + 90 * 24 * 60 * 60),
@@ -1528,27 +1530,27 @@ fn logging_security_evidence_materialization_budget(
     Ok(budget)
 }
 
-fn logging_security_access_group(
+fn logging_cybersec_access_group(
     state: &ApiState,
     now: u64,
 ) -> Result<AccessGroupRecord, ApiError> {
     let service_ref = format!("service:logging:{}", state.service_identity.service_pk);
     let group = AccessGroupRecord {
         kind: Some(RECORD_ACCESS_GROUP.to_string()),
-        group_id: "access-group:logging.security.default".to_string(),
+        group_id: "access-group:logging.cybersec.default".to_string(),
         owner_ref: service_ref.clone(),
         subject_ref: "logging.events.encryptedDetail".to_string(),
         content_classes: vec![
             "encryptedDetail".to_string(),
             "diagnosticDetail".to_string(),
         ],
-        member_refs: vec![service_ref.clone(), "constitute-security".to_string()],
+        member_refs: vec![service_ref.clone(), "constitute-cybersec".to_string()],
         admin_refs: vec![service_ref],
-        current_epoch_id: "access-epoch:logging.security.default:1".to_string(),
-        partition_refs: vec!["partition:event-fabric:logging-security".to_string()],
-        policy_refs: vec!["policy:logging.security.default".to_string()],
+        current_epoch_id: "access-epoch:logging.cybersec.default:1".to_string(),
+        partition_refs: vec!["partition:event-fabric:logging-cybersec".to_string()],
+        policy_refs: vec!["policy:logging.cybersec.default".to_string()],
         safe_facts: json!({
-            "purpose": "securityReplay",
+            "purpose": "cybersecReplay",
             "retentionWindow": "90d",
             "readability": "futureEpochsOnly"
         }),
@@ -1558,26 +1560,26 @@ fn logging_security_access_group(
     Ok(group)
 }
 
-fn logging_security_access_epoch(
+fn logging_cybersec_access_epoch(
     state: &ApiState,
     now: u64,
 ) -> Result<AccessEpochRecord, ApiError> {
     let service_ref = format!("service:logging:{}", state.service_identity.service_pk);
     let epoch = AccessEpochRecord {
         kind: Some(RECORD_ACCESS_EPOCH.to_string()),
-        epoch_id: "access-epoch:logging.security.default:1".to_string(),
-        group_id: "access-group:logging.security.default".to_string(),
+        epoch_id: "access-epoch:logging.cybersec.default:1".to_string(),
+        group_id: "access-group:logging.cybersec.default".to_string(),
         sequence: 1,
         change_kind: "create".to_string(),
         previous_epoch_id: None,
-        member_refs: vec![service_ref, "constitute-security".to_string()],
-        added_member_refs: vec!["constitute-security".to_string()],
+        member_refs: vec![service_ref, "constitute-cybersec".to_string()],
+        added_member_refs: vec!["constitute-cybersec".to_string()],
         removed_member_refs: Vec::new(),
-        partition_refs: vec!["partition:event-fabric:logging-security".to_string()],
-        key_ref: "key-ref:logging.security.default:epoch:1".to_string(),
-        proof_refs: vec!["profile:logging.security.default".to_string()],
+        partition_refs: vec!["partition:event-fabric:logging-cybersec".to_string()],
+        key_ref: "key-ref:logging.cybersec.default:epoch:1".to_string(),
+        proof_refs: vec!["profile:logging.cybersec.default".to_string()],
         safe_facts: json!({
-            "purpose": "securityReplay",
+            "purpose": "cybersecReplay",
             "contentClasses": ["encryptedDetail", "diagnosticDetail"]
         }),
         issued_at: now,
@@ -1591,15 +1593,15 @@ fn logging_event_fabric_access_classes(
     state: &ApiState,
     now: u64,
 ) -> Result<Vec<EventFabricAccessClassRecord>, ApiError> {
-    let group_id = "access-group:logging.security.default".to_string();
+    let group_id = "access-group:logging.cybersec.default".to_string();
     let classes = vec![
         EventFabricAccessClassRecord {
             kind: Some(RECORD_EVENT_FABRIC_ACCESS_CLASS.to_string()),
-            class_id: "event-class:logging.security.encrypted-detail".to_string(),
+            class_id: "event-class:logging.cybersec.encrypted-detail".to_string(),
             content_class: "encryptedDetail".to_string(),
             privacy_tier: "domainEncrypted".to_string(),
             event_classes: vec![
-                LOG_EVIDENCE_PROFILE_EVENT_SECURITY_AUDIT.to_string(),
+                LOG_EVIDENCE_PROFILE_EVENT_CYBERSEC_AUDIT.to_string(),
                 LOG_EVIDENCE_PROFILE_EVENT_RUNTIME_DIAGNOSTIC.to_string(),
                 LOG_EVIDENCE_PROFILE_EVENT_SERVICE_EVENT.to_string(),
                 LOG_EVIDENCE_PROFILE_EVENT_STORAGE_ACCESS.to_string(),
@@ -1608,7 +1610,7 @@ fn logging_event_fabric_access_classes(
             access_group_refs: vec![group_id.clone()],
             processor_role_refs: vec![
                 "role:logging.processor".to_string(),
-                "role:security.processor".to_string(),
+                "role:cybersec.processor".to_string(),
             ],
             storage_class: state.engine.archive_container_id(),
             retention_class: "rolling.security-evidence".to_string(),
@@ -1619,21 +1621,21 @@ fn logging_event_fabric_access_classes(
                 "highCardinalityOverflow": "encryptedDetailRef"
             }),
             safe_facts: json!({
-                "processorAgreement": "logging-security-replay",
+                "eventView": "security-replay",
                 "detailCustody": "encryptedDetailRef"
             }),
             issued_at: now,
         },
         EventFabricAccessClassRecord {
             kind: Some(RECORD_EVENT_FABRIC_ACCESS_CLASS.to_string()),
-            class_id: "event-class:logging.security.diagnostic-detail".to_string(),
+            class_id: "event-class:logging.cybersec.diagnostic-detail".to_string(),
             content_class: "diagnosticDetail".to_string(),
             privacy_tier: "domainEncrypted".to_string(),
             event_classes: vec![LOG_EVIDENCE_PROFILE_EVENT_RUNTIME_DIAGNOSTIC.to_string()],
             access_group_refs: vec![group_id],
             processor_role_refs: vec![
                 "role:logging.processor".to_string(),
-                "role:security.processor".to_string(),
+                "role:cybersec.processor".to_string(),
             ],
             storage_class: state.engine.archive_container_id(),
             retention_class: "rolling.diagnostic-detail".to_string(),
@@ -1661,7 +1663,6 @@ fn logging_event_fabric_processor_contracts(
     now: u64,
     access_classes: &[EventFabricAccessClassRecord],
     dashboard_budget: &MaterializationBudget,
-    security_budget: &MaterializationBudget,
 ) -> Result<Vec<EventFabricProcessorContractRecord>, ApiError> {
     let service_ref = format!("service:logging:{}", state.service_identity.service_pk);
     let mut access_class_refs = access_classes
@@ -1682,202 +1683,73 @@ fn logging_event_fabric_processor_contracts(
         .collect::<Vec<_>>();
     input_content_classes.sort();
     input_content_classes.dedup();
-    let access_group_refs = vec!["access-group:logging.security.default".to_string()];
+    let access_group_refs = vec!["access-group:logging.cybersec.default".to_string()];
     let archive_ref = state.engine.archive_container_id();
-    let contracts = vec![
-        EventFabricProcessorContractRecord {
-            kind: Some(RECORD_EVENT_FABRIC_PROCESSOR_CONTRACT.to_string()),
-            processor_contract_id: "processor-contract:logging.dashboard".to_string(),
-            fabric_ref: "event-fabric:logging.default".to_string(),
-            processor_ref: service_ref.clone(),
-            processor_role_ref: "role:logging.processor".to_string(),
-            state: "ready".to_string(),
-            input_access_class_refs: access_class_refs.clone(),
-            input_event_classes: input_event_classes.clone(),
-            input_content_classes: input_content_classes.clone(),
-            output_refs: vec![
-                "projection:logging.events".to_string(),
-                "projection:logging.dashboard".to_string(),
-                "projection:logging.health".to_string(),
-            ],
-            storage_refs: vec![archive_ref.clone()],
-            access_group_refs: access_group_refs.clone(),
-            consumer_floor: dashboard_budget.consumer_floor.clone(),
-            materialization_budget: Some(dashboard_budget.clone()),
-            bitemporal_policy: json!({
-                "eventTimeField": "occurredAt",
-                "observedTimeField": "receivedAt"
-            }),
-            schema_policy: json!({
-                "currentVersion": "constitute.logging.dashboard.v1",
-                "unknownVersionPosture": "ignore"
-            }),
-            compaction_policy: json!({
-                "snapshotCadence": "bounded",
-                "compactionFloor": "consumerFloor.compactionFloor"
-            }),
-            cardinality_policy: json!({
-                "maxLabelValues": 250,
-                "highCardinalityOverflow": "encryptedDetailRef"
-            }),
-            encrypted_detail_custody: json!({
-                "state": "referenceOnly",
-                "accessGroupRefs": access_group_refs.clone()
-            }),
-            sampling_policy: json!({
-                "state": "adaptive",
-                "degradeBefore": ["authority", "route", "activation"]
-            }),
-            safe_facts: json!({
-                "purpose": "dashboardProjection",
-                "detailCustody": "encryptedDetailRef"
-            }),
-            evidence_refs: vec!["logging.dashboard.processor".to_string()],
-            blocked_reasons: Vec::new(),
-            issued_at: now,
-            expires_at: Some(now + 5 * 60),
-        },
-        EventFabricProcessorContractRecord {
-            kind: Some(RECORD_EVENT_FABRIC_PROCESSOR_CONTRACT.to_string()),
-            processor_contract_id: "processor-contract:logging.security".to_string(),
-            fabric_ref: "event-fabric:logging.default".to_string(),
-            processor_ref: "constitute-security".to_string(),
-            processor_role_ref: "role:security.processor".to_string(),
-            state: "ready".to_string(),
-            input_access_class_refs: access_class_refs,
-            input_event_classes,
-            input_content_classes,
-            output_refs: vec![
-                "security:evidence:logging.default".to_string(),
-                "storage:logging.security.archive".to_string(),
-            ],
-            storage_refs: vec![archive_ref],
-            access_group_refs,
-            consumer_floor: security_budget.consumer_floor.clone(),
-            materialization_budget: Some(security_budget.clone()),
-            bitemporal_policy: json!({
-                "eventTimeField": "occurredAt",
-                "observedTimeField": "receivedAt"
-            }),
-            schema_policy: json!({
-                "currentVersion": "logging.security.evidence.v1",
-                "unknownVersionPosture": "ignore"
-            }),
-            compaction_policy: json!({
-                "snapshotCadence": "retention-window",
-                "compactionFloor": "retention-window:90d"
-            }),
-            cardinality_policy: json!({
-                "rawDetail": "byObjectRef",
-                "safeFacts": "indexedSummary",
-                "highCardinalityOverflow": "encryptedDetailRef"
-            }),
-            encrypted_detail_custody: json!({
-                "state": "referenceOnly",
-                "accessGroupRefs": ["access-group:logging.security.default"]
-            }),
-            sampling_policy: json!({
-                "state": "fullWithinRetention",
-                "degradeBefore": ["authority", "route", "activation"]
-            }),
-            safe_facts: json!({
-                "purpose": "securityReplay",
-                "detailCustody": "encryptedDetailRef"
-            }),
-            evidence_refs: vec!["logging.security.default".to_string()],
-            blocked_reasons: Vec::new(),
-            issued_at: now,
-            expires_at: Some(now + 90 * 24 * 60 * 60),
-        },
-    ];
+    let contracts = vec![EventFabricProcessorContractRecord {
+        kind: Some(RECORD_EVENT_FABRIC_PROCESSOR_CONTRACT.to_string()),
+        processor_contract_id: "processor-contract:logging.dashboard".to_string(),
+        fabric_ref: "event-fabric:logging.default".to_string(),
+        processor_ref: service_ref.clone(),
+        processor_role_ref: "role:logging.processor".to_string(),
+        state: "ready".to_string(),
+        input_access_class_refs: access_class_refs,
+        input_event_classes,
+        input_content_classes,
+        output_refs: vec![
+            "projection:logging.events".to_string(),
+            "projection:logging.dashboard".to_string(),
+            "projection:logging.health".to_string(),
+        ],
+        storage_refs: vec![archive_ref],
+        access_group_refs: access_group_refs.clone(),
+        consumer_floor: dashboard_budget.consumer_floor.clone(),
+        materialization_budget: Some(dashboard_budget.clone()),
+        bitemporal_policy: json!({
+            "eventTimeField": "occurredAt",
+            "observedTimeField": "receivedAt"
+        }),
+        schema_policy: json!({
+            "currentVersion": "constitute.logging.dashboard.v1",
+            "unknownVersionPosture": "ignore"
+        }),
+        compaction_policy: json!({
+            "snapshotCadence": "bounded",
+            "compactionFloor": "consumerFloor.compactionFloor"
+        }),
+        cardinality_policy: json!({
+            "maxLabelValues": 250,
+            "highCardinalityOverflow": "encryptedDetailRef"
+        }),
+        encrypted_detail_custody: json!({
+            "state": "referenceOnly",
+            "accessGroupRefs": access_group_refs.clone()
+        }),
+        sampling_policy: json!({
+            "state": "adaptive",
+            "degradeBefore": ["authority", "route", "activation"]
+        }),
+        safe_facts: json!({
+            "purpose": "dashboardProjection",
+            "detailCustody": "encryptedDetailRef"
+        }),
+        evidence_refs: vec!["logging.dashboard.processor".to_string()],
+        blocked_reasons: Vec::new(),
+        issued_at: now,
+        expires_at: Some(now + 5 * 60),
+    }];
     for contract in &contracts {
         validate_event_fabric_processor_contract(contract).map_err(anyhow::Error::from)?;
     }
     Ok(contracts)
 }
 
-fn logging_security_processor_seed(
-    state: &ApiState,
-    now: u64,
-    access_classes: &[EventFabricAccessClassRecord],
-    processor_contracts: &[EventFabricProcessorContractRecord],
-    evidence_profile: &LogEvidenceProfile,
-    security_budget: &MaterializationBudget,
-) -> Result<SecurityProcessorSeedRecord, ApiError> {
-    let mut access_class_refs = access_classes
-        .iter()
-        .map(|class| class.class_id.clone())
-        .collect::<Vec<_>>();
-    access_class_refs.sort();
-    access_class_refs.dedup();
-    let mut input_event_classes = access_classes
-        .iter()
-        .flat_map(|class| class.event_classes.iter().cloned())
-        .collect::<Vec<_>>();
-    input_event_classes.sort();
-    input_event_classes.dedup();
-    let mut input_content_classes = access_classes
-        .iter()
-        .map(|class| class.content_class.clone())
-        .collect::<Vec<_>>();
-    input_content_classes.sort();
-    input_content_classes.dedup();
-    let processor_contract_refs = processor_contracts
-        .iter()
-        .filter(|contract| contract.processor_role_ref == "role:security.processor")
-        .map(|contract| contract.processor_contract_id.clone())
-        .collect::<Vec<_>>();
-    let seed = SecurityProcessorSeedRecord {
-        kind: Some(RECORD_SECURITY_PROCESSOR_SEED.to_string()),
-        seed_id: "security-seed:logging.default".to_string(),
-        fabric_ref: "event-fabric:logging.default".to_string(),
-        processor_ref: "constitute-security".to_string(),
-        processor_role_ref: "role:security.processor".to_string(),
-        state: "ready".to_string(),
-        threat_analysis_role: "eventFabricThreatAnalysis".to_string(),
-        input_access_class_refs: access_class_refs,
-        input_event_classes,
-        input_content_classes,
-        access_group_refs: vec!["access-group:logging.security.default".to_string()],
-        processor_contract_refs,
-        evidence_profile_refs: vec![evidence_profile.profile_id.clone()],
-        materialization_budget_refs: vec![security_budget.budget_id.clone()],
-        storage_refs: vec![state.engine.archive_container_id()],
-        detail_refs: vec!["encrypted-detail:logging.default".to_string()],
-        alert_output_refs: vec!["security:alerts:logging.default".to_string()],
-        evidence_hold_refs: vec!["security:evidence-hold:logging.default".to_string()],
-        retention_hold_refs: vec!["retention:security-hold:logging.default".to_string()],
-        encrypted_detail_custody: json!({
-            "state": "referenceOnly",
-            "accessGroupRefs": ["access-group:logging.security.default"],
-            "detailRefs": ["encrypted-detail:logging.default"]
-        }),
-        semantic_boundaries: json!({
-            "logging": "mayConsumeMaterializations",
-            "storage": "ciphertextFulfillmentOnly",
-            "eventDomain": "doesNotOwn"
-        }),
-        safe_facts: json!({
-            "purpose": "securityThreatAnalysis",
-            "detailCustody": "encryptedDetailRef",
-            "alerting": "seeded"
-        }),
-        evidence_refs: vec!["logging.security.default".to_string()],
-        blocked_reasons: Vec::new(),
-        issued_at: now,
-        expires_at: Some(now + 90 * 24 * 60 * 60),
-    };
-    validate_security_processor_seed(&seed).map_err(anyhow::Error::from)?;
-    Ok(seed)
-}
-
-fn security_evidence_profile(state: &ApiState, now: u64) -> Result<LogEvidenceProfile, ApiError> {
+fn cybersec_evidence_profile(state: &ApiState, now: u64) -> Result<LogEvidenceProfile, ApiError> {
     let profile = LogEvidenceProfile {
         kind: Some(LOG_EVIDENCE_PROFILE_KIND.to_string()),
-        profile_id: "logging.security.default".to_string(),
-        consumer_ref: "constitute-security".to_string(),
+        profile_id: "logging.cybersec.default".to_string(),
+        consumer_ref: "constitute-cybersec".to_string(),
         event_classes: vec![
-            LOG_EVIDENCE_PROFILE_EVENT_SECURITY_AUDIT.to_string(),
+            LOG_EVIDENCE_PROFILE_EVENT_CYBERSEC_AUDIT.to_string(),
             LOG_EVIDENCE_PROFILE_EVENT_RUNTIME_DIAGNOSTIC.to_string(),
             LOG_EVIDENCE_PROFILE_EVENT_SERVICE_EVENT.to_string(),
             LOG_EVIDENCE_PROFILE_EVENT_STORAGE_ACCESS.to_string(),
@@ -1886,13 +1758,13 @@ fn security_evidence_profile(state: &ApiState, now: u64) -> Result<LogEvidencePr
         retention_window: "90d".to_string(),
         safe_index_refs: vec![
             "logging.events.safeIndex".to_string(),
-            "logging.dashboard.securitySummary".to_string(),
+            "logging.dashboard.cybersecSummary".to_string(),
         ],
         detail_custody: LOG_EVIDENCE_DETAIL_CUSTODY_ENCRYPTED_DETAIL_REF.to_string(),
         encrypted_detail_required: true,
-        access_grant_refs: vec!["grant:logging.security.default".to_string()],
+        access_grant_refs: vec!["grant:logging.cybersec.default".to_string()],
         storage_container_refs: vec![state.engine.archive_container_id()],
-        materialization_budget_ref: Some("logging.security.default.90d".to_string()),
+        materialization_budget_ref: Some("logging.cybersec.default.90d".to_string()),
         issued_at: now,
         expires_at: Some(now + 90 * 24 * 60 * 60),
     };
@@ -2050,7 +1922,7 @@ fn projection_affected_records(projection: &Value) -> Vec<Value> {
         .get("channelId")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
-    if channel_id == "logging.events" {
+    if channel_id == constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS {
         return projection
             .get("payload")
             .and_then(|payload| payload.get("events"))
@@ -2846,13 +2718,13 @@ mod tests {
             expires_at: None,
             nonce: "nonce-logging-edge-event".to_string(),
             correlation_id: Some("corr-logging-edge-event".to_string()),
-            channel_id: Some("logging.events".to_string()),
+            channel_id: Some(constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS.to_string()),
             record_ref: Some(SwarmRecordRef {
                 kind: "logging.event".to_string(),
                 id: event.event_id.clone(),
                 revision: Some(1),
             }),
-            capability: Some("logging.events.ingest".to_string()),
+            capability: Some(constitute_protocol::CAPABILITY_LOGGING_EVENTS_INGEST.to_string()),
             body: SwarmFrameBody {
                 encoding: "caac".to_string(),
                 envelope: Some(json!({
@@ -2895,7 +2767,7 @@ mod tests {
             correlation_id: Some(format!("corr-logging-observe-{channel_id}")),
             channel_id: Some(channel_id.to_string()),
             record_ref: Some(SwarmRecordRef {
-                kind: "projection.snapshot".to_string(),
+                kind: constitute_protocol::RECORD_PROJECTION_SNAPSHOT.to_string(),
                 id: channel_id.to_string(),
                 revision: None,
             }),
@@ -2957,13 +2829,13 @@ mod tests {
             expires_at: Some(now + 60_000),
             nonce: "nonce-logging-real-caac-event".to_string(),
             correlation_id: Some("corr-logging-real-caac-event".to_string()),
-            channel_id: Some("logging.events".to_string()),
+            channel_id: Some(constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS.to_string()),
             record_ref: Some(SwarmRecordRef {
                 kind: "logging.event".to_string(),
                 id: "edge-event".to_string(),
                 revision: Some(1),
             }),
-            capability: Some("logging.events.ingest".to_string()),
+            capability: Some(constitute_protocol::CAPABILITY_LOGGING_EVENTS_INGEST.to_string()),
             body: SwarmFrameBody {
                 encoding: "caac".to_string(),
                 envelope: Some(serde_json::to_value(envelope).expect("envelope json")),
@@ -2989,16 +2861,16 @@ mod tests {
                 "method": "runtime.diagnostics.log",
                 "signalType": "intent",
                 "activation": {
-                    "kind": "runtime.activation.request",
+                    "kind": constitute_protocol::RECORD_RUNTIME_ACTIVATION_REQUEST,
                     "activationId": "diag-runtime-event",
                     "nodeRef": "runtime.diagnostics",
-                    "capabilityRef": "logging.events.ingest"
+                    "capabilityRef": constitute_protocol::CAPABILITY_LOGGING_EVENTS_INGEST
                 },
                 "record": {
-                    "kind": "runtime.activation.request",
+                    "kind": constitute_protocol::RECORD_RUNTIME_ACTIVATION_REQUEST,
                     "activationId": "diag-runtime-event",
                     "nodeRef": "runtime.diagnostics",
-                    "capabilityRef": "logging.events.ingest"
+                    "capabilityRef": constitute_protocol::CAPABILITY_LOGGING_EVENTS_INGEST
                 },
                 "payload": {
                     "recordKind": "logging.event",
@@ -3028,13 +2900,13 @@ mod tests {
             expires_at: Some(now + 60_000),
             nonce: "nonce-runtime-diagnostic-log".to_string(),
             correlation_id: Some("runtime-diagnostic-correlation".to_string()),
-            channel_id: Some("logging.events".to_string()),
+            channel_id: Some(constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS.to_string()),
             record_ref: Some(SwarmRecordRef {
                 kind: "logging.event".to_string(),
                 id: event.event_id.clone(),
                 revision: Some(1),
             }),
-            capability: Some("logging.events.ingest".to_string()),
+            capability: Some(constitute_protocol::CAPABILITY_LOGGING_EVENTS_INGEST.to_string()),
             body: SwarmFrameBody {
                 encoding: "caac".to_string(),
                 envelope: Some(serde_json::to_value(envelope).expect("envelope json")),
@@ -3059,7 +2931,10 @@ mod tests {
 
         assert_eq!(response["status"], "accepted");
         assert_eq!(response["accepted"], 1);
-        assert_eq!(response["channelId"], "logging.events");
+        assert_eq!(
+            response["channelId"],
+            constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS
+        );
         let delta: SwarmProjectionDelta =
             serde_json::from_value(response["projectionDelta"].clone()).expect("delta");
         validate_projection_delta(&delta, 2).expect("valid edge projection delta");
@@ -3123,9 +2998,9 @@ mod tests {
             trace_id: None,
         });
         event.safe_facts = json!({
-            "kind": "route.observation",
-            "capabilityRef": "logging.events.ingest",
-            "channelRef": "logging.events",
+            "kind": constitute_protocol::RECORD_ROUTE_OBSERVATION,
+            "capabilityRef": constitute_protocol::CAPABILITY_LOGGING_EVENTS_INGEST,
+            "channelRef": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
             "correlationId": "diag-runtime"
         });
         event.event_id = log_event_id(&event).expect("event id");
@@ -3147,7 +3022,7 @@ mod tests {
         assert_eq!(found.events[0].event_id, event.event_id);
         assert_eq!(
             found.events[0].safe_facts["capabilityRef"],
-            "logging.events.ingest"
+            constitute_protocol::CAPABILITY_LOGGING_EVENTS_INGEST
         );
     }
 
@@ -3162,13 +3037,16 @@ mod tests {
 
         assert_eq!(emitted.len(), 1);
         assert_eq!(emitted[0].kind, SwarmFrameKind::ProjectionDelta);
-        assert_eq!(emitted[0].channel_id.as_deref(), Some("logging.events"));
+        assert_eq!(
+            emitted[0].channel_id.as_deref(),
+            Some(constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS)
+        );
         assert_eq!(
             emitted[0]
                 .record_ref
                 .as_ref()
                 .map(|record| record.kind.as_str()),
-            Some("projection.delta")
+            Some(constitute_protocol::RECORD_PROJECTION_DELTA)
         );
         validate_swarm_frame(&emitted[0], 1_700_000_000_001).expect("valid emitted frame");
 
@@ -3190,7 +3068,7 @@ mod tests {
         let mut frame = logging_event_frame(event);
         frame.channel_id = Some("swarm.route".to_string());
         frame.record_ref = Some(SwarmRecordRef {
-            kind: "route.observation".to_string(),
+            kind: constitute_protocol::RECORD_ROUTE_OBSERVATION.to_string(),
             id: "route-observation".to_string(),
             revision: Some(1),
         });
@@ -3220,20 +3098,25 @@ mod tests {
             .await
             .expect("seed event");
 
-        let observe_frame = logging_projection_observe_frame("logging.dashboard");
+        let observe_frame = logging_projection_observe_frame(
+            constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD,
+        );
         let emitted = process_gateway_frame(&state.state, observe_frame, 1_700_000_000_100)
             .await
             .expect("projection observe frame");
 
         assert_eq!(emitted.len(), 1);
         assert_eq!(emitted[0].kind, SwarmFrameKind::ProjectionSnapshot);
-        assert_eq!(emitted[0].channel_id.as_deref(), Some("logging.dashboard"));
+        assert_eq!(
+            emitted[0].channel_id.as_deref(),
+            Some(constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD)
+        );
         assert_eq!(
             emitted[0]
                 .record_ref
                 .as_ref()
                 .map(|record| record.kind.as_str()),
-            Some("projection.snapshot")
+            Some(constitute_protocol::RECORD_PROJECTION_SNAPSHOT)
         );
         validate_swarm_frame(&emitted[0], 1_700_000_000_101).expect("valid snapshot frame");
     }
@@ -3265,13 +3148,16 @@ mod tests {
         assert_eq!(emitted.len(), 3);
         assert_eq!(emitted[0].kind, SwarmFrameKind::ProjectionDelta);
         assert_eq!(emitted[1].kind, SwarmFrameKind::StoragePinIntent);
-        assert_eq!(emitted[1].channel_id.as_deref(), Some("storage.pin.intent"));
+        assert_eq!(
+            emitted[1].channel_id.as_deref(),
+            Some(constitute_protocol::RECORD_STORAGE_PIN_INTENT)
+        );
         assert_eq!(
             emitted[1]
                 .record_ref
                 .as_ref()
                 .map(|record| record.kind.as_str()),
-            Some("storage.pin.intent")
+            Some(constitute_protocol::RECORD_STORAGE_PIN_INTENT)
         );
         validate_swarm_frame(&emitted[1], 1_700_000_000_001).expect("valid storage pin frame");
         assert_eq!(emitted[2].kind, SwarmFrameKind::StoragePinIntent);
@@ -3314,7 +3200,7 @@ mod tests {
             &state,
             &json!({
                 "requestId": "projection-test",
-                "channelId": "logging.events",
+                "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
                 "limit": 10,
                 "filters": {}
             }),
@@ -3322,7 +3208,10 @@ mod tests {
             1_700_000_000,
         )
         .expect("projection");
-        assert_eq!(projection["channelId"], "logging.events");
+        assert_eq!(
+            projection["channelId"],
+            constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS
+        );
         assert_eq!(projection["service"], "logging");
         assert_eq!(projection["servicePk"], state.service_identity.service_pk);
         assert!(
@@ -3334,7 +3223,7 @@ mod tests {
         assert_eq!(projection["safeFacts"]["eventCount"], 0);
         assert_eq!(
             projection["materializationBudget"]["kind"],
-            "materialization.budget"
+            constitute_protocol::RECORD_MATERIALIZATION_BUDGET
         );
         assert_eq!(
             projection["materializationBudget"]["payloadClass"],
@@ -3346,7 +3235,7 @@ mod tests {
         );
         assert_eq!(
             projection["materializationBudget"]["consumerFloor"]["kind"],
-            "consumer.floor"
+            constitute_protocol::RECORD_CONSUMER_FLOOR
         );
         assert_eq!(projection["replayPosture"]["schema"]["state"], "current");
         assert_eq!(
@@ -3365,7 +3254,7 @@ mod tests {
             &state,
             &json!({
                 "requestId": "projection-delta-events",
-                "channelId": "logging.events",
+                "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
                 "baseRevision": 7,
                 "filters": {}
             }),
@@ -3393,7 +3282,7 @@ mod tests {
             &state,
             &json!({
                 "requestId": "projection-dashboard",
-                "channelId": "logging.dashboard",
+                "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD,
                 "baseRevision": 3
             }),
             "projection-dashboard".to_string(),
@@ -3514,11 +3403,11 @@ mod tests {
             &state,
             &json!({
                 "requestId": "projection-first",
-                "channelId": "logging.events",
+                "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
                 "filters": {},
                 "policy": {
                     "policyId": "logging.default.72h.low",
-                    "channelId": "logging.events",
+                    "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
                     "service": "logging",
                     "rollingWindowHours": 72,
                     "maxVerbosityClass": "normal",
@@ -3577,11 +3466,11 @@ mod tests {
             &state,
             &json!({
                 "requestId": "projection-noise",
-                "channelId": "logging.events",
+                "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
                 "filters": {},
                 "policy": {
                     "policyId": "logging.default.72h.low",
-                    "channelId": "logging.events",
+                    "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
                     "service": "logging",
                     "rollingWindowHours": 72,
                     "maxVerbosityClass": "normal",
@@ -3617,7 +3506,10 @@ mod tests {
         let projection =
             logging_health_projection(&state, "projection-health".to_string(), 0, 1_700_000_000)
                 .expect("projection");
-        assert_eq!(projection["channelId"], "logging.health");
+        assert_eq!(
+            projection["channelId"],
+            constitute_protocol::PROJECTION_CHANNEL_LOGGING_HEALTH
+        );
         assert_eq!(projection["service"], "logging");
         assert_eq!(projection["payload"]["health"]["status"], "ok");
         assert_eq!(projection["safeFacts"]["storageStatus"], "not_configured");
@@ -3653,13 +3545,16 @@ mod tests {
             &state,
             &json!({
                 "requestId": "projection-dashboard",
-                "channelId": "logging.dashboard"
+                "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD
             }),
             "projection-dashboard".to_string(),
             1_700_000_010,
         )
         .expect("projection");
-        assert_eq!(projection["channelId"], "logging.dashboard");
+        assert_eq!(
+            projection["channelId"],
+            constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD
+        );
         assert_eq!(projection["payload"]["severityCounts"]["critical"], 1);
         assert_eq!(
             projection["payload"]["criticalShortlist"]
@@ -3697,17 +3592,10 @@ mod tests {
         assert!(
             access_class
                 .processor_role_refs
-                .contains(&"role:security.processor".to_string())
+                .contains(&"role:cybersec.processor".to_string())
         );
         assert_eq!(
             event_fabric["processorContracts"].as_array().unwrap().len(),
-            2
-        );
-        assert_eq!(
-            event_fabric["securityProcessorSeeds"]
-                .as_array()
-                .unwrap()
-                .len(),
             1
         );
         let processor_contract: EventFabricProcessorContractRecord =
@@ -3732,51 +3620,41 @@ mod tests {
                 .map(|floor| floor.lag_state.as_str()),
             Some("caughtUp")
         );
-        let security_seed: SecurityProcessorSeedRecord =
-            serde_json::from_value(event_fabric["securityProcessorSeeds"][0].clone())
-                .expect("security processor seed");
-        validate_security_processor_seed(&security_seed).expect("valid security processor seed");
-        assert_eq!(security_seed.processor_ref, "constitute-security");
-        assert_eq!(
-            security_seed
-                .semantic_boundaries
-                .get("eventDomain")
-                .and_then(|value| value.as_str()),
-            Some("doesNotOwn")
-        );
         let profile = &projection["payload"]["evidenceProfiles"][0];
-        assert_eq!(profile["kind"], "logging.evidence.profile");
-        assert_eq!(profile["consumerRef"], "constitute-security");
+        assert_eq!(
+            profile["kind"],
+            constitute_protocol::LOG_EVIDENCE_PROFILE_KIND
+        );
+        assert_eq!(profile["consumerRef"], "constitute-cybersec");
         assert_eq!(profile["detailCustody"], "encryptedDetailRef");
         assert_eq!(
             profile["storageContainerRefs"][0],
             state.engine.archive_container_id()
         );
-        assert_eq!(projection["safeFacts"]["securityEvidenceProfiles"], 1);
-        assert_eq!(projection["safeFacts"]["securityMaterializationBudgets"], 1);
+        assert_eq!(projection["safeFacts"]["cybersecEvidenceProfiles"], 1);
+        assert_eq!(projection["safeFacts"]["cybersecMaterializationBudgets"], 1);
         assert_eq!(projection["safeFacts"]["eventFabricAccessGroups"], 1);
         assert_eq!(projection["safeFacts"]["eventFabricAccessClasses"], 2);
-        assert_eq!(projection["safeFacts"]["eventFabricProcessorContracts"], 2);
-        assert_eq!(projection["safeFacts"]["securityProcessorSeeds"], 1);
+        assert_eq!(projection["safeFacts"]["eventFabricProcessorContracts"], 1);
         assert_eq!(
             projection["materializationBudget"]["kind"],
-            "materialization.budget"
+            constitute_protocol::RECORD_MATERIALIZATION_BUDGET
         );
         assert_eq!(
             projection["replayPosture"]["consumerFloor"]["kind"],
-            "consumer.floor"
+            constitute_protocol::RECORD_CONSUMER_FLOOR
         );
         let budget: MaterializationBudget =
             serde_json::from_value(projection["materializationBudget"].clone()).expect("budget");
         validate_materialization_budget(&budget).expect("valid dashboard projection budget");
-        let security_budget: MaterializationBudget = serde_json::from_value(
+        let cybersec_budget: MaterializationBudget = serde_json::from_value(
             projection["payload"]["evidenceMaterializationBudgets"][0].clone(),
         )
-        .expect("security budget");
-        validate_materialization_budget(&security_budget).expect("valid security budget");
-        assert_eq!(security_budget.payload_class, "retainedRaw");
+        .expect("cybersec budget");
+        validate_materialization_budget(&cybersec_budget).expect("valid cybersec budget");
+        assert_eq!(cybersec_budget.payload_class, "retainedRaw");
         assert_eq!(
-            security_budget.privacy_tier.as_deref(),
+            cybersec_budget.privacy_tier.as_deref(),
             Some("encryptedDetail")
         );
     }

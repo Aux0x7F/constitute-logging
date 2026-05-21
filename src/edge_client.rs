@@ -1,3 +1,4 @@
+// domain-owned-vocabulary: logging.edge.reject swarm.edge.claims
 use anyhow::{Context, Result};
 use constitute_protocol::{
     CAPABILITY_SWARM_EDGE_ATTACH, SWARM_EDGE_WIRE_ACCEPT, SWARM_EDGE_WIRE_HELLO,
@@ -766,7 +767,11 @@ mod tests {
                 .capability_refs
                 .contains(&CAPABILITY_PROJECTION_OBSERVE.to_string())
         );
-        assert!(hello.channel_refs.contains(&"logging.events".to_string()));
+        assert!(
+            hello
+                .channel_refs
+                .contains(&constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS.to_string())
+        );
         assert!(
             hello
                 .promise_refs
@@ -843,7 +848,7 @@ mod tests {
             expires_at: Some(now + 60_000),
             nonce: "logging-overload-source-nonce".to_string(),
             correlation_id: None,
-            channel_id: Some("logging.events".to_string()),
+            channel_id: Some(constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS.to_string()),
             record_ref: None,
             capability: None,
             body: SwarmFrameBody {
@@ -903,7 +908,7 @@ mod tests {
                 "issuedAt": now,
                 "expiresAt": now + 60_000,
                 "nonce": "legacy-service-signal-nonce",
-                "channelId": "logging.dashboard",
+                "channelId": constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD,
                 "body": {
                     "encoding": "caac",
                     "envelope": { "envelopeId": "legacy" },

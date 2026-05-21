@@ -1,3 +1,4 @@
+// domain-owned-vocabulary: logging.dashboard.observe logging.health.observe logging.surface logging.surface.observe
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -98,18 +99,18 @@ fn persist_hosted_service_manifest(
         "summary": "Structured safe event observation and retention state.",
         "nodes": ["events", "health", "dashboard", "settings"],
         "capabilities": [
-            "projection.observe",
-            "logging.events.ingest",
-            "logging.events.observe",
+            constitute_protocol::CAPABILITY_PROJECTION_OBSERVE,
+            constitute_protocol::CAPABILITY_LOGGING_EVENTS_INGEST,
+            constitute_protocol::CAPABILITY_LOGGING_EVENTS_OBSERVE,
             "logging.health.observe",
             "logging.dashboard.observe",
             "logging.surface.observe"
         ],
         "channels": [
             "logging.surface",
-            "logging.events",
-            "logging.health",
-            "logging.dashboard"
+            constitute_protocol::PROJECTION_CHANNEL_LOGGING_EVENTS,
+            constitute_protocol::PROJECTION_CHANNEL_LOGGING_HEALTH,
+            constitute_protocol::PROJECTION_CHANNEL_LOGGING_DASHBOARD
         ],
         "swarmEdge": {
             "memberRef": service_pk,
