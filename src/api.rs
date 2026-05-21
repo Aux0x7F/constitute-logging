@@ -1179,6 +1179,7 @@ fn logging_dashboard_projection(
         now,
         &event_fabric_access_classes,
         &materialization_budget,
+        &cybersec_budget,
     )?;
     let coverage = json!({
         "materializedCount": materialized_count,
@@ -1663,6 +1664,7 @@ fn logging_event_fabric_processor_contracts(
     now: u64,
     access_classes: &[EventFabricAccessClassRecord],
     dashboard_budget: &MaterializationBudget,
+    cybersec_budget: &MaterializationBudget,
 ) -> Result<Vec<EventFabricProcessorContractRecord>, ApiError> {
     let service_ref = format!("service:logging:{}", state.service_identity.service_pk);
     let mut access_class_refs = access_classes
@@ -1685,58 +1687,113 @@ fn logging_event_fabric_processor_contracts(
     input_content_classes.dedup();
     let access_group_refs = vec!["access-group:logging.cybersec.default".to_string()];
     let archive_ref = state.engine.archive_container_id();
-    let contracts = vec![EventFabricProcessorContractRecord {
-        kind: Some(RECORD_EVENT_FABRIC_PROCESSOR_CONTRACT.to_string()),
-        processor_contract_id: "processor-contract:logging.dashboard".to_string(),
-        fabric_ref: "event-fabric:logging.default".to_string(),
-        processor_ref: service_ref.clone(),
-        processor_role_ref: "role:logging.processor".to_string(),
-        state: "ready".to_string(),
-        input_access_class_refs: access_class_refs,
-        input_event_classes,
-        input_content_classes,
-        output_refs: vec![
-            "projection:logging.events".to_string(),
-            "projection:logging.dashboard".to_string(),
-            "projection:logging.health".to_string(),
-        ],
-        storage_refs: vec![archive_ref],
-        access_group_refs: access_group_refs.clone(),
-        consumer_floor: dashboard_budget.consumer_floor.clone(),
-        materialization_budget: Some(dashboard_budget.clone()),
-        bitemporal_policy: json!({
-            "eventTimeField": "occurredAt",
-            "observedTimeField": "receivedAt"
-        }),
-        schema_policy: json!({
-            "currentVersion": "constitute.logging.dashboard.v1",
-            "unknownVersionPosture": "ignore"
-        }),
-        compaction_policy: json!({
-            "snapshotCadence": "bounded",
-            "compactionFloor": "consumerFloor.compactionFloor"
-        }),
-        cardinality_policy: json!({
-            "maxLabelValues": 250,
-            "highCardinalityOverflow": "encryptedDetailRef"
-        }),
-        encrypted_detail_custody: json!({
-            "state": "referenceOnly",
-            "accessGroupRefs": access_group_refs.clone()
-        }),
-        sampling_policy: json!({
-            "state": "adaptive",
-            "degradeBefore": ["authority", "route", "activation"]
-        }),
-        safe_facts: json!({
-            "purpose": "dashboardProjection",
-            "detailCustody": "encryptedDetailRef"
-        }),
-        evidence_refs: vec!["logging.dashboard.processor".to_string()],
-        blocked_reasons: Vec::new(),
-        issued_at: now,
-        expires_at: Some(now + 5 * 60),
-    }];
+    let contracts = vec![
+        EventFabricProcessorContractRecord {
+            kind: Some(RECORD_EVENT_FABRIC_PROCESSOR_CONTRACT.to_string()),
+            processor_contract_id: "processor-contract:logging.dashboard".to_string(),
+            fabric_ref: "event-fabric:logging.default".to_string(),
+            processor_ref: service_ref.clone(),
+            processor_role_ref: "role:logging.processor".to_string(),
+            state: "ready".to_string(),
+            input_access_class_refs: access_class_refs.clone(),
+            input_event_classes: input_event_classes.clone(),
+            input_content_classes: input_content_classes.clone(),
+            output_refs: vec![
+                "projection:logging.events".to_string(),
+                "projection:logging.dashboard".to_string(),
+                "projection:logging.health".to_string(),
+            ],
+            storage_refs: vec![archive_ref.clone()],
+            access_group_refs: access_group_refs.clone(),
+            consumer_floor: dashboard_budget.consumer_floor.clone(),
+            materialization_budget: Some(dashboard_budget.clone()),
+            bitemporal_policy: json!({
+                "eventTimeField": "occurredAt",
+                "observedTimeField": "receivedAt"
+            }),
+            schema_policy: json!({
+                "currentVersion": "constitute.logging.dashboard.v1",
+                "unknownVersionPosture": "ignore"
+            }),
+            compaction_policy: json!({
+                "snapshotCadence": "bounded",
+                "compactionFloor": "consumerFloor.compactionFloor"
+            }),
+            cardinality_policy: json!({
+                "maxLabelValues": 250,
+                "highCardinalityOverflow": "encryptedDetailRef"
+            }),
+            encrypted_detail_custody: json!({
+                "state": "referenceOnly",
+                "accessGroupRefs": access_group_refs.clone()
+            }),
+            sampling_policy: json!({
+                "state": "adaptive",
+                "degradeBefore": ["authority", "route", "activation"]
+            }),
+            safe_facts: json!({
+                "purpose": "dashboardProjection",
+                "detailCustody": "encryptedDetailRef"
+            }),
+            evidence_refs: vec!["logging.dashboard.processor".to_string()],
+            blocked_reasons: Vec::new(),
+            issued_at: now,
+            expires_at: Some(now + 5 * 60),
+        },
+        EventFabricProcessorContractRecord {
+            kind: Some(RECORD_EVENT_FABRIC_PROCESSOR_CONTRACT.to_string()),
+            processor_contract_id: "processor-contract:logging.cybersec".to_string(),
+            fabric_ref: "event-fabric:logging.default".to_string(),
+            processor_ref: "constitute-cybersec".to_string(),
+            processor_role_ref: "role:cybersec.processor".to_string(),
+            state: "ready".to_string(),
+            input_access_class_refs: access_class_refs,
+            input_event_classes,
+            input_content_classes,
+            output_refs: vec![
+                "cybersec:alerts:logging.default".to_string(),
+                "cybersec:evidence-hold:logging.default".to_string(),
+            ],
+            storage_refs: vec![archive_ref],
+            access_group_refs: access_group_refs.clone(),
+            consumer_floor: cybersec_budget.consumer_floor.clone(),
+            materialization_budget: Some(cybersec_budget.clone()),
+            bitemporal_policy: json!({
+                "eventTimeField": "occurredAt",
+                "observedTimeField": "receivedAt"
+            }),
+            schema_policy: json!({
+                "currentVersion": "logging.cybersec.evidence.v1",
+                "unknownVersionPosture": "holdRefOnly"
+            }),
+            compaction_policy: json!({
+                "snapshotCadence": "storageContainer",
+                "compactionFloor": "retention-window:90d"
+            }),
+            cardinality_policy: json!({
+                "rawDetail": "byObjectRef",
+                "safeFacts": "indexedSummary",
+                "highCardinalityOverflow": "encryptedDetailRef"
+            }),
+            encrypted_detail_custody: json!({
+                "state": "referenceOnly",
+                "accessGroupRefs": access_group_refs,
+                "detailRefs": ["encrypted-detail:logging.default"]
+            }),
+            sampling_policy: json!({
+                "state": "adaptive",
+                "degradeBefore": ["authority", "route", "activation"]
+            }),
+            safe_facts: json!({
+                "purpose": "cybersecThreatAnalysis",
+                "detailCustody": "encryptedDetailRef"
+            }),
+            evidence_refs: vec!["logging.cybersec.default".to_string()],
+            blocked_reasons: Vec::new(),
+            issued_at: now,
+            expires_at: Some(now + 90 * 24 * 60 * 60),
+        },
+    ];
     for contract in &contracts {
         validate_event_fabric_processor_contract(contract).map_err(anyhow::Error::from)?;
     }
@@ -3596,13 +3653,27 @@ mod tests {
         );
         assert_eq!(
             event_fabric["processorContracts"].as_array().unwrap().len(),
-            1
+            2
         );
-        let processor_contract: EventFabricProcessorContractRecord =
-            serde_json::from_value(event_fabric["processorContracts"][0].clone())
+        let processor_contracts: Vec<EventFabricProcessorContractRecord> =
+            serde_json::from_value(event_fabric["processorContracts"].clone())
                 .expect("event fabric processor contract");
-        validate_event_fabric_processor_contract(&processor_contract)
-            .expect("valid event fabric processor contract");
+        for processor_contract in &processor_contracts {
+            validate_event_fabric_processor_contract(processor_contract)
+                .expect("valid event fabric processor contract");
+        }
+        let processor_contract = processor_contracts
+            .iter()
+            .find(|contract| {
+                contract.processor_contract_id == "processor-contract:logging.dashboard"
+            })
+            .expect("logging processor contract");
+        let cybersec_processor_contract = processor_contracts
+            .iter()
+            .find(|contract| {
+                contract.processor_contract_id == "processor-contract:logging.cybersec"
+            })
+            .expect("cybersec processor contract");
         assert_eq!(
             processor_contract.fabric_ref,
             "event-fabric:logging.default"
@@ -3620,6 +3691,28 @@ mod tests {
                 .map(|floor| floor.lag_state.as_str()),
             Some("caughtUp")
         );
+        assert_eq!(
+            cybersec_processor_contract.processor_ref,
+            "constitute-cybersec"
+        );
+        assert_eq!(
+            cybersec_processor_contract.processor_role_ref,
+            "role:cybersec.processor"
+        );
+        assert_eq!(
+            cybersec_processor_contract
+                .materialization_budget
+                .as_ref()
+                .map(|budget| budget.budget_id.as_str()),
+            Some("logging.cybersec.default.90d")
+        );
+        assert_eq!(
+            cybersec_processor_contract
+                .encrypted_detail_custody
+                .get("state")
+                .and_then(Value::as_str),
+            Some("referenceOnly")
+        );
         let profile = &projection["payload"]["evidenceProfiles"][0];
         assert_eq!(
             profile["kind"],
@@ -3635,7 +3728,7 @@ mod tests {
         assert_eq!(projection["safeFacts"]["cybersecMaterializationBudgets"], 1);
         assert_eq!(projection["safeFacts"]["eventFabricAccessGroups"], 1);
         assert_eq!(projection["safeFacts"]["eventFabricAccessClasses"], 2);
-        assert_eq!(projection["safeFacts"]["eventFabricProcessorContracts"], 1);
+        assert_eq!(projection["safeFacts"]["eventFabricProcessorContracts"], 2);
         assert_eq!(
             projection["materializationBudget"]["kind"],
             constitute_protocol::RECORD_MATERIALIZATION_BUDGET
