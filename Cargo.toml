@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 clap = { version = "4.5", features = ["derive", "env"] }
+constitute-fabric = { path = "../constitute-fabric" }
 constitute-protocol = { path = "../constitute-protocol" }
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

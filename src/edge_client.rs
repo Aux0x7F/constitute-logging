@@ -1,10 +1,10 @@
 // domain-owned-vocabulary: logging.edge.reject swarm.edge.claims
 use anyhow::{Context, Result};
+use constitute_fabric::{HostFabricMemberContributionSpec, build_host_fabric_member_contribution};
 use constitute_protocol::{
-    CAPABILITY_SWARM_EDGE_ATTACH, SWARM_EDGE_WIRE_ACCEPT, SWARM_EDGE_WIRE_HELLO,
-    SWARM_EDGE_WIRE_RESUME, SWARM_FRAME_VERSION, SWARM_WIRE_FRAME,
-    FABRIC_MEMBER_CONTRIBUTION_RUNNING, FABRIC_MEMBER_ROLE_LOGGING_PROCESSOR,
-    HostFabricMemberContribution, RECORD_HOST_FABRIC_MEMBER_CONTRIBUTION, SwarmAck,
+    CAPABILITY_SWARM_EDGE_ATTACH, FABRIC_MEMBER_CONTRIBUTION_RUNNING,
+    FABRIC_MEMBER_ROLE_LOGGING_PROCESSOR, HostFabricMemberContribution, SWARM_EDGE_WIRE_ACCEPT,
+    SWARM_EDGE_WIRE_HELLO, SWARM_EDGE_WIRE_RESUME, SWARM_FRAME_VERSION, SWARM_WIRE_FRAME, SwarmAck,
     SwarmEdgeAccept, SwarmEdgeHello, SwarmFrame, SwarmFrameBody, SwarmFrameKind, ZoneScope,
     seal_envelope, swarm_frame_id, validate_host_fabric_member_contribution,
     validate_swarm_edge_hello, validate_swarm_frame,
@@ -61,7 +61,8 @@ enum ServiceWireMessage<'a> {
 
 pub fn build_hello(config: &SwarmEdgeClientConfig, now: u64) -> SwarmEdgeHello {
     let service_ref = format!("service:logging:{}", config.service_pk.trim());
-    let fabric_contribution = logging_host_fabric_contribution(config, &service_ref, now);
+    let fabric_contribution = logging_host_fabric_contribution(config, &service_ref, now)
+        .expect("logging host-fabric contribution builds");
     let fabric_contribution_ref = fabric_contribution.contribution_id.clone();
     validate_host_fabric_member_contribution(&fabric_contribution)
         .expect("logging host-fabric contribution is valid");
@@ -130,12 +131,11 @@ fn logging_host_fabric_contribution(
     config: &SwarmEdgeClientConfig,
     service_ref: &str,
     now: u64,
-) -> HostFabricMemberContribution {
+) -> Result<HostFabricMemberContribution> {
     let zone_ref = format!("discovery:{}", config.zone_id.trim());
     let fabric_ref = format!("host-fabric:{}", config.zone_id.trim());
     let evidence_ref = format!("swarm.edge.hello:logging:{now}");
-    HostFabricMemberContribution {
-        kind: Some(RECORD_HOST_FABRIC_MEMBER_CONTRIBUTION.to_string()),
+    let contribution = build_host_fabric_member_contribution(HostFabricMemberContributionSpec {
         contribution_id: format!("hostFabric:logging:{}", config.service_pk.trim()),
         fabric_ref,
         host_ref: zone_ref.clone(),
@@ -149,7 +149,10 @@ fn logging_host_fabric_contribution(
             .map(|value| value.to_string())
             .collect(),
         grant_refs: Vec::new(),
-        input_refs: LOGGING_CHANNELS.iter().map(|value| value.to_string()).collect(),
+        input_refs: LOGGING_CHANNELS
+            .iter()
+            .map(|value| value.to_string())
+            .collect(),
         output_refs: vec![service_ref.to_string()],
         evidence_refs: vec![evidence_ref],
         lifecycle_plan_refs: Vec::new(),
@@ -163,7 +166,10 @@ fn logging_host_fabric_contribution(
         }),
         observed_at: now,
         expires_at: Some(now + 60_000),
-    }
+    })?;
+    validate_host_fabric_member_contribution(&contribution)
+        .expect("logging host-fabric contribution is valid");
+    Ok(contribution)
 }
 
 pub fn validate_hello(hello: &SwarmEdgeHello) -> Result<()> {
