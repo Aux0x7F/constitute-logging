@@ -1,10 +1,13 @@
 // domain-owned-vocabulary: logging.edge.reject swarm.edge.claims
 use anyhow::{Context, Result};
+use constitute_fabric::{HostFabricMemberContributionSpec, build_host_fabric_member_contribution};
 use constitute_protocol::{
-    CAPABILITY_SWARM_EDGE_ATTACH, SWARM_EDGE_WIRE_ACCEPT, SWARM_EDGE_WIRE_HELLO,
-    SWARM_EDGE_WIRE_RESUME, SWARM_FRAME_VERSION, SWARM_WIRE_FRAME, SwarmAck, SwarmEdgeAccept,
-    SwarmEdgeHello, SwarmFrame, SwarmFrameBody, SwarmFrameKind, ZoneScope, seal_envelope,
-    swarm_frame_id, validate_swarm_edge_hello, validate_swarm_frame,
+    CAPABILITY_SWARM_EDGE_ATTACH, FABRIC_MEMBER_CONTRIBUTION_RUNNING,
+    FABRIC_MEMBER_ROLE_LOGGING_PROCESSOR, HostFabricMemberContribution, SWARM_EDGE_WIRE_ACCEPT,
+    SWARM_EDGE_WIRE_HELLO, SWARM_EDGE_WIRE_RESUME, SWARM_FRAME_VERSION, SWARM_WIRE_FRAME, SwarmAck,
+    SwarmEdgeAccept, SwarmEdgeHello, SwarmFrame, SwarmFrameBody, SwarmFrameKind, ZoneScope,
+    seal_envelope, swarm_frame_id, validate_host_fabric_member_contribution,
+    validate_swarm_edge_hello, validate_swarm_frame,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -58,7 +61,16 @@ enum ServiceWireMessage<'a> {
 
 pub fn build_hello(config: &SwarmEdgeClientConfig, now: u64) -> SwarmEdgeHello {
     let service_ref = format!("service:logging:{}", config.service_pk.trim());
-    let promise_refs = vec![service_ref.clone(), config.service_pk.trim().to_string()];
+    let fabric_contribution = logging_host_fabric_contribution(config, &service_ref, now)
+        .expect("logging host-fabric contribution builds");
+    let fabric_contribution_ref = fabric_contribution.contribution_id.clone();
+    validate_host_fabric_member_contribution(&fabric_contribution)
+        .expect("logging host-fabric contribution is valid");
+    let promise_refs = vec![
+        service_ref.clone(),
+        config.service_pk.trim().to_string(),
+        fabric_contribution_ref.clone(),
+    ];
     SwarmEdgeHello {
         member_kind: "service".to_string(),
         member_ref: config.member_ref.clone(),
@@ -95,6 +107,8 @@ pub fn build_hello(config: &SwarmEdgeClientConfig, now: u64) -> SwarmEdgeHello {
                     "memberRef": config.member_ref.clone(),
                     "serviceRef": service_ref,
                     "servicePk": config.service_pk.clone(),
+                    "hostFabricMemberContributionRef": fabric_contribution_ref,
+                    "hostFabricMemberContribution": fabric_contribution,
                     "capabilityRefs": LOGGING_EDGE_CAPABILITIES,
                     "channelRefs": LOGGING_CHANNELS,
                     "promiseRefs": promise_refs,
@@ -111,6 +125,51 @@ pub fn build_hello(config: &SwarmEdgeClientConfig, now: u64) -> SwarmEdgeHello {
             signature: None,
         },
     }
+}
+
+fn logging_host_fabric_contribution(
+    config: &SwarmEdgeClientConfig,
+    service_ref: &str,
+    now: u64,
+) -> Result<HostFabricMemberContribution> {
+    let zone_ref = format!("discovery:{}", config.zone_id.trim());
+    let fabric_ref = format!("host-fabric:{}", config.zone_id.trim());
+    let evidence_ref = format!("swarm.edge.hello:logging:{now}");
+    let contribution = build_host_fabric_member_contribution(HostFabricMemberContributionSpec {
+        contribution_id: format!("hostFabric:logging:{}", config.service_pk.trim()),
+        fabric_ref,
+        host_ref: zone_ref.clone(),
+        member_ref: config.member_ref.clone(),
+        role: FABRIC_MEMBER_ROLE_LOGGING_PROCESSOR.to_string(),
+        state: FABRIC_MEMBER_CONTRIBUTION_RUNNING.to_string(),
+        contract_ref: service_ref.to_string(),
+        subject_ref: service_ref.to_string(),
+        capability_refs: LOGGING_EDGE_CAPABILITIES
+            .iter()
+            .map(|value| value.to_string())
+            .collect(),
+        grant_refs: Vec::new(),
+        input_refs: LOGGING_CHANNELS
+            .iter()
+            .map(|value| value.to_string())
+            .collect(),
+        output_refs: vec![service_ref.to_string()],
+        evidence_refs: vec![evidence_ref],
+        lifecycle_plan_refs: Vec::new(),
+        release_refs: Vec::new(),
+        resource_posture: None,
+        blocked_reasons: Vec::new(),
+        safe_facts: json!({
+            "service": "logging",
+            "role": FABRIC_MEMBER_ROLE_LOGGING_PROCESSOR,
+            "zoneRef": zone_ref,
+        }),
+        observed_at: now,
+        expires_at: Some(now + 60_000),
+    })?;
+    validate_host_fabric_member_contribution(&contribution)
+        .expect("logging host-fabric contribution is valid");
+    Ok(contribution)
 }
 
 pub fn validate_hello(hello: &SwarmEdgeHello) -> Result<()> {
@@ -778,6 +837,11 @@ mod tests {
                 .contains(&format!("service:logging:{service_pk}"))
         );
         assert!(hello.promise_refs.contains(&service_pk));
+        assert!(
+            hello
+                .promise_refs
+                .contains(&format!("hostFabric:logging:{service_pk}"))
+        );
 
         let wire =
             serde_json::to_value(ServiceWireMessage::Hello { hello: &hello }).expect("wire json");
