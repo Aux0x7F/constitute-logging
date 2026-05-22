@@ -295,6 +295,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 [[package]]
 name = "constitute-fabric"
 version = "0.1.0"
+source = "git+https://github.com/Aux0x7F/constitute-fabric?branch=main#433f54397fdee6f5619f9de408b4a307143a0191"
 dependencies = [
  "anyhow",
  "constitute-protocol",
@@ -329,6 +330,7 @@ dependencies = [
 [[package]]
 name = "constitute-protocol"
 version = "0.1.0"
+source = "git+https://github.com/Aux0x7F/constitute-protocol?branch=main#e0db94216f0a57bf427086f225156db4625717cd"
 dependencies = [
  "anyhow",
  "base64",
