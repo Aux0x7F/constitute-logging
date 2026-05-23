@@ -28,21 +28,13 @@ struct Args {
     swarm_zone_id: String,
 }
 
-fn configured_swarm_edge_endpoint(args: &Args) -> Option<String> {
-    args.swarm_edge_endpoint
-        .clone()
-        .or_else(|| std::env::var("CONSTITUTE_SWARM_EDGE_URL").ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::new(&args.log_level))
         .init();
-    let engine = LoggingEngine::open(&args.data_dir, args.archive_container_id.clone())?;
+    let engine = LoggingEngine::open(&args.data_dir, args.archive_container_id)?;
     let identity = LoggingServiceIdentity::load_or_create(&args.data_dir)?;
     let bind = args.bind.to_string();
     persist_hosted_service_manifest(
@@ -52,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
         &identity,
         &bind,
     )?;
-    if let Some(gateway_endpoint) = configured_swarm_edge_endpoint(&args) {
+    if let Some(gateway_endpoint) = args.swarm_edge_endpoint.clone() {
         let edge_state = api::ApiState {
             engine: engine.clone(),
             storage_url: args.storage_url.clone(),
