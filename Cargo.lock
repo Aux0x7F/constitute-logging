@@ -295,7 +295,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 [[package]]
 name = "constitute-fabric"
 version = "0.1.0"
-source = "git+https://github.com/Aux0x7F/constitute-fabric?branch=0x%2Ffabric-transition%2Ftopology-execution#148566766163dfe5c6d18d5257213775f6b7418e"
+source = "git+https://github.com/Aux0x7F/constitute-fabric?branch=0x%2Ffabric-transition%2Ftopology-execution#ed9e35a98175d193898904d45c3475f02047db53"
 dependencies = [
  "anyhow",
  "constitute-protocol",
@@ -330,7 +330,7 @@ dependencies = [
 [[package]]
 name = "constitute-protocol"
 version = "0.1.0"
-source = "git+https://github.com/Aux0x7F/constitute-protocol?branch=0x%2Ffabric-transition%2Ftopology-execution#7f7ecb1b628cfa05b396f23b480f741fe5b1ce43"
+source = "git+https://github.com/Aux0x7F/constitute-protocol?branch=0x%2Ffabric-transition%2Ftopology-execution#59780429db834875e274cad07f7c467737a86dd0"
 dependencies = [
  "anyhow",
  "base64",
