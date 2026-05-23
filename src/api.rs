@@ -1,4 +1,4 @@
-// domain-owned-vocabulary: logging.cybersec.default logging.cybersec.default.90d logging.cybersec.evidence.v1 logging.dashboard.cybersecSummary logging.dashboard.observe logging.dashboard.processor logging.default.72h.low logging.event logging.events.encryptedDetail logging.events.safeIndex logging.health.observe logging.projection logging.service logging.settings logging.surface logging.surface.observe logging.unknown runtime.diagnostics runtime.diagnostics.log runtime.projection.store service.projection.request service.projection.response swarm.route
+// domain-owned-vocabulary: logging.cybersec.default logging.cybersec.default.90d logging.cybersec.evidence.v1 logging.dashboard.cybersecSummary logging.dashboard.observe logging.dashboard.processor logging.default.72h.low logging.event logging.events.encryptedDetail logging.events.safeIndex logging.health.observe logging.projection logging.service logging.settings logging.surface logging.surface.observe logging.unknown runtime.diagnostics runtime.diagnostics.log runtime.projection.store service.projection.request service.projection.response storage.archive.url.unconfigured swarm.route
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::http::StatusCode;
@@ -15,7 +15,8 @@ use constitute_protocol::{
     LOG_EVIDENCE_PROFILE_KIND, LogCategory, LogEventEnvelope, LogEvidenceProfile, LogOutcome,
     LogSeverity, MaterializationBudget, MaterializationSchemaPosture, ProjectionDeltaOp,
     ProjectionDeltaOpKind, ProjectionPathSegment, RECORD_ACCESS_EPOCH, RECORD_ACCESS_GROUP,
-    RECORD_CONSUMER_FLOOR, RECORD_EVENT_FABRIC_ACCESS_CLASS,
+    RECORD_CONSUMER_FLOOR, RECORD_CYBERSEC_EVIDENCE_HOLD, RECORD_CYBERSEC_FINDING,
+    RECORD_CYBERSEC_MITIGATION_RECOMMENDATION, RECORD_EVENT_FABRIC_ACCESS_CLASS,
     RECORD_EVENT_FABRIC_PROCESSOR_CONTRACT, RECORD_MATERIALIZATION_BUDGET, SWARM_FRAME_VERSION,
     StoragePinIntent, SwarmFrame, SwarmFrameBody, SwarmFrameKind, SwarmProjectionDelta,
     SwarmProjectionSnapshot, SwarmRecordRef, ZoneScope, open_envelope, seal_envelope, sha256_hex,
@@ -1181,6 +1182,17 @@ fn logging_dashboard_projection(
         &materialization_budget,
         &cybersec_budget,
     )?;
+    let service_ref = format!("service:logging:{}", state.service_identity.service_pk);
+    let event_fabric_missing_reasons = if state.storage_url.is_some() {
+        Vec::<String>::new()
+    } else {
+        vec!["storage.archive.url.unconfigured".to_string()]
+    };
+    let event_fabric_input_state = if event_fabric_missing_reasons.is_empty() {
+        "ready"
+    } else {
+        "degraded"
+    };
     let coverage = json!({
         "materializedCount": materialized_count,
         "targetCount": target_count,
@@ -1236,6 +1248,45 @@ fn logging_dashboard_projection(
                     .map(serde_json::to_value)
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(anyhow::Error::from)?,
+                "processorInputPosture": {
+                    "state": event_fabric_input_state,
+                    "ownerRef": service_ref,
+                    "consumerRefs": ["constitute-cybersec"],
+                    "evidenceProfileRefs": ["logging.cybersec.default"],
+                    "materializationBudgetRefs": ["logging.cybersec.default.90d"],
+                    "accessClassRefs": event_fabric_access_classes
+                        .iter()
+                        .map(|class| class.class_id.clone())
+                        .collect::<Vec<_>>(),
+                    "accessGroupRefs": ["access-group:logging.cybersec.default"],
+                    "storageRefs": [state.engine.archive_container_id()],
+                    "detailRefs": ["encrypted-detail:logging.default"],
+                    "custody": {
+                        "state": "referenceOnly",
+                        "accessGroupRefs": ["access-group:logging.cybersec.default"],
+                        "detailRefs": ["encrypted-detail:logging.default"]
+                    },
+                    "bitemporal": {
+                        "eventTimeField": "occurredAt",
+                        "observedTimeField": "receivedAt"
+                    },
+                    "consumerFloorRefs": [
+                        materialization_budget.consumer_floor
+                            .as_ref()
+                            .map(|floor| floor.floor_id.clone())
+                            .unwrap_or_default(),
+                        cybersec_budget.consumer_floor
+                            .as_ref()
+                            .map(|floor| floor.floor_id.clone())
+                            .unwrap_or_default()
+                    ],
+                    "missingReasons": event_fabric_missing_reasons,
+                    "outputRecordKinds": [
+                        RECORD_CYBERSEC_FINDING,
+                        RECORD_CYBERSEC_EVIDENCE_HOLD,
+                        RECORD_CYBERSEC_MITIGATION_RECOMMENDATION
+                    ]
+                },
                 "contentClasses": cybersec_access_group.content_classes,
                 "currentEpochId": cybersec_access_epoch.epoch_id
             },
@@ -1751,8 +1802,11 @@ fn logging_event_fabric_processor_contracts(
             input_event_classes,
             input_content_classes,
             output_refs: vec![
+                "cybersec:findings:logging.default".to_string(),
                 "cybersec:alerts:logging.default".to_string(),
-                "cybersec:evidence-hold:logging.default".to_string(),
+                "cybersec:evidence-holds:logging.default".to_string(),
+                "retention:cybersec:logging.default".to_string(),
+                "cybersec:mitigation-recommendations:logging.default".to_string(),
             ],
             storage_refs: vec![archive_ref],
             access_group_refs: access_group_refs.clone(),
@@ -3699,6 +3753,21 @@ mod tests {
             cybersec_processor_contract.processor_role_ref,
             "role:cybersec.processor"
         );
+        assert!(
+            cybersec_processor_contract
+                .output_refs
+                .contains(&"cybersec:findings:logging.default".to_string())
+        );
+        assert!(
+            cybersec_processor_contract
+                .output_refs
+                .contains(&"retention:cybersec:logging.default".to_string())
+        );
+        assert!(
+            cybersec_processor_contract
+                .output_refs
+                .contains(&"cybersec:mitigation-recommendations:logging.default".to_string())
+        );
         assert_eq!(
             cybersec_processor_contract
                 .materialization_budget
@@ -3712,6 +3781,29 @@ mod tests {
                 .get("state")
                 .and_then(Value::as_str),
             Some("referenceOnly")
+        );
+        let input_posture = &event_fabric["processorInputPosture"];
+        assert_eq!(input_posture["state"], "degraded");
+        assert_eq!(
+            input_posture["ownerRef"],
+            format!("service:logging:{}", state.service_identity.service_pk)
+        );
+        assert_eq!(input_posture["consumerRefs"][0], "constitute-cybersec");
+        assert_eq!(
+            input_posture["outputRecordKinds"][0],
+            RECORD_CYBERSEC_FINDING
+        );
+        assert_eq!(
+            input_posture["outputRecordKinds"][1],
+            RECORD_CYBERSEC_EVIDENCE_HOLD
+        );
+        assert_eq!(
+            input_posture["outputRecordKinds"][2],
+            RECORD_CYBERSEC_MITIGATION_RECOMMENDATION
+        );
+        assert_eq!(
+            input_posture["missingReasons"][0],
+            "storage.archive.url.unconfigured"
         );
         let profile = &projection["payload"]["evidenceProfiles"][0];
         assert_eq!(
