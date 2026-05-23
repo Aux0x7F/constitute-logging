@@ -140,10 +140,21 @@ fn logging_host_fabric_contribution(
         fabric_ref,
         host_ref: zone_ref.clone(),
         member_ref: config.member_ref.clone(),
+        participant_ref: config.member_ref.clone(),
         role: FABRIC_MEMBER_ROLE_LOGGING_PROCESSOR.to_string(),
+        role_ref: format!("role:{FABRIC_MEMBER_ROLE_LOGGING_PROCESSOR}"),
         state: FABRIC_MEMBER_CONTRIBUTION_RUNNING.to_string(),
         contract_ref: service_ref.to_string(),
         subject_ref: service_ref.to_string(),
+        module_refs: vec![
+            "module:logging-edge-client".to_string(),
+            "module:logging-processor".to_string(),
+            service_ref.to_string(),
+        ],
+        source_refs: vec![format!(
+            "source:logging:{}",
+            config.service_pk.trim()
+        )],
         capability_refs: LOGGING_EDGE_CAPABILITIES
             .iter()
             .map(|value| value.to_string())
