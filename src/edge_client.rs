@@ -1,13 +1,17 @@
 // domain-owned-vocabulary: logging.edge.reject swarm.edge.claims
 use anyhow::{Context, Result};
-use constitute_fabric::{HostFabricMemberContributionSpec, build_host_fabric_member_contribution};
+use constitute_fabric::{
+    GatewayWebSocketCarrierSessionEvidenceInput, HostFabricMemberContributionSpec,
+    build_gateway_websocket_carrier_session_evidence, build_host_fabric_member_contribution,
+};
 use constitute_protocol::{
-    CAPABILITY_SWARM_EDGE_ATTACH, FABRIC_MEMBER_CONTRIBUTION_RUNNING,
-    FABRIC_MEMBER_ROLE_LOGGING_PROCESSOR, HostFabricMemberContribution, SWARM_EDGE_WIRE_ACCEPT,
-    SWARM_EDGE_WIRE_HELLO, SWARM_EDGE_WIRE_RESUME, SWARM_FRAME_VERSION, SWARM_WIRE_FRAME, SwarmAck,
-    SwarmEdgeAccept, SwarmEdgeHello, SwarmFrame, SwarmFrameBody, SwarmFrameKind, ZoneScope,
-    seal_envelope, swarm_frame_id, validate_host_fabric_member_contribution,
-    validate_swarm_edge_hello, validate_swarm_frame,
+    CAPABILITY_SWARM_EDGE_ATTACH, CARRIER_EDGE_SESSION_OPEN, CarrierEdgeSessionEvidence,
+    FABRIC_MEMBER_CONTRIBUTION_RUNNING, FABRIC_MEMBER_ROLE_LOGGING_PROCESSOR,
+    HostFabricMemberContribution, SWARM_EDGE_WIRE_ACCEPT, SWARM_EDGE_WIRE_HELLO,
+    SWARM_EDGE_WIRE_RESUME, SWARM_FRAME_VERSION, SWARM_WIRE_FRAME, SwarmAck, SwarmEdgeAccept,
+    SwarmEdgeHello, SwarmFrame, SwarmFrameBody, SwarmFrameKind, ZoneScope, seal_envelope,
+    swarm_frame_id, validate_carrier_edge_session_evidence,
+    validate_host_fabric_member_contribution, validate_swarm_edge_hello, validate_swarm_frame,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -33,6 +37,7 @@ pub struct SwarmEdgeClientConfig {
 #[derive(Clone, Debug, Default)]
 pub struct SwarmEdgeClientState {
     pub session_id: Option<String>,
+    pub carrier_edge_session_evidence: Option<CarrierEdgeSessionEvidence>,
     pub last_acked_frame_id: Option<String>,
     pub rejects: Vec<String>,
 }
@@ -140,10 +145,18 @@ fn logging_host_fabric_contribution(
         fabric_ref,
         host_ref: zone_ref.clone(),
         member_ref: config.member_ref.clone(),
+        participant_ref: config.member_ref.clone(),
         role: FABRIC_MEMBER_ROLE_LOGGING_PROCESSOR.to_string(),
+        role_ref: format!("role:{FABRIC_MEMBER_ROLE_LOGGING_PROCESSOR}"),
         state: FABRIC_MEMBER_CONTRIBUTION_RUNNING.to_string(),
         contract_ref: service_ref.to_string(),
         subject_ref: service_ref.to_string(),
+        module_refs: vec![
+            "module:logging-edge-client".to_string(),
+            "module:logging-processor".to_string(),
+            service_ref.to_string(),
+        ],
+        source_refs: vec![format!("source:logging:{}", config.service_pk.trim())],
         capability_refs: LOGGING_EDGE_CAPABILITIES
             .iter()
             .map(|value| value.to_string())
@@ -374,11 +387,7 @@ pub async fn handle_gateway_text(
     };
     match message {
         GatewayWireMessage::Accept { accept } | GatewayWireMessage::Resume { accept } => {
-            tracing::info!(
-                session_id = %accept.session_id,
-                "logging attached to gateway edge stream"
-            );
-            client_state.session_id = Some(accept.session_id);
+            note_carrier_edge_accept(client_state, &accept, now)?;
             Ok(Vec::new())
         }
         GatewayWireMessage::Frame { frame } => {
@@ -445,11 +454,7 @@ async fn handle_gateway_text_for_queue(
     };
     match message {
         GatewayWireMessage::Accept { accept } | GatewayWireMessage::Resume { accept } => {
-            tracing::info!(
-                session_id = %accept.session_id,
-                "logging attached to gateway edge stream"
-            );
-            client_state.session_id = Some(accept.session_id);
+            note_carrier_edge_accept(client_state, &accept, now)?;
         }
         GatewayWireMessage::Frame { frame } => {
             admit_logging_gateway_frame(state, client_state, frame, now, frame_tx, out_tx);
@@ -501,6 +506,63 @@ fn try_send_logging_edge_response(out_tx: &mpsc::Sender<SwarmFrame>, frame: Swar
             "logging edge response queue saturated"
         );
     }
+}
+
+pub fn logging_carrier_edge_session_evidence(
+    accept: &SwarmEdgeAccept,
+    now: u64,
+) -> Result<CarrierEdgeSessionEvidence> {
+    let member_ref = accept.member_ref.trim();
+    let session_id = accept.session_id.trim();
+    let service_ref = accept
+        .promise_refs
+        .iter()
+        .map(|reference| reference.trim())
+        .find(|reference| reference.starts_with("service:"))
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("service:logging:{member_ref}"));
+    build_gateway_websocket_carrier_session_evidence(GatewayWebSocketCarrierSessionEvidenceInput {
+        evidence_id: format!(
+            "carrier-edge-evidence:logging:{}:{}",
+            slug(&service_ref),
+            slug(session_id)
+        ),
+        selection_ref: format!("carrier-select:{}:gateway-edge", slug(&service_ref)),
+        edge_session_ref: format!("edge-session:{session_id}"),
+        participant_ref: service_ref.clone(),
+        peer_ref: None,
+        session_binding_ref: format!("binding:gateway-edge:{session_id}"),
+        safe_facts: json!({
+            "service": "logging",
+            "memberKind": accept.member_kind,
+            "capabilityCount": accept.capability_refs.len(),
+            "channelCount": accept.channel_refs.len(),
+            "promiseCount": accept.promise_refs.len(),
+            "source": "swarmEdgeAccept"
+        }),
+        evidence_refs: vec![format!("session:{session_id}"), service_ref],
+        proof_substrate_refs: vec![],
+        resource_posture_refs: vec![],
+        observed_at: now,
+        expires_at: accept.expires_at,
+    })
+}
+
+fn note_carrier_edge_accept(
+    client_state: &mut SwarmEdgeClientState,
+    accept: &SwarmEdgeAccept,
+    now: u64,
+) -> Result<()> {
+    let evidence = logging_carrier_edge_session_evidence(accept, now)?;
+    tracing::info!(
+        session_id = %accept.session_id,
+        adapter_ref = %evidence.adapter_ref,
+        carrier_state = %evidence.state,
+        "logging carrier edge session open"
+    );
+    client_state.session_id = Some(accept.session_id.clone());
+    client_state.carrier_edge_session_evidence = Some(evidence);
+    Ok(())
 }
 
 async fn process_gateway_work_frame(
@@ -588,6 +650,23 @@ fn handle_ack_reject(client_state: &mut SwarmEdgeClientState, frame: &SwarmFrame
 
 pub fn wire_kind(value: &Value) -> Option<&str> {
     value.get("type").and_then(Value::as_str)
+}
+
+fn slug(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 pub const HELLO_WIRE_KIND: &str = SWARM_EDGE_WIRE_HELLO;
@@ -846,6 +925,47 @@ mod tests {
         let wire =
             serde_json::to_value(ServiceWireMessage::Hello { hello: &hello }).expect("wire json");
         assert_eq!(wire_kind(&wire), Some(HELLO_WIRE_KIND));
+    }
+
+    #[test]
+    fn logging_edge_client_materializes_carrier_evidence_from_accept() {
+        let service_pk = pubkey_from_sk_hex(&"1".repeat(64)).expect("service pk");
+        let config = SwarmEdgeClientConfig {
+            gateway_endpoint: "ws://127.0.0.1:7000/swarm.edge".to_string(),
+            member_ref: service_pk.clone(),
+            service_pk: service_pk.clone(),
+            service_sk_hex: "1".repeat(64),
+            zone_id: "zone_lab".to_string(),
+        };
+        let hello = build_hello(&config, 1_700_000_000_000);
+        let accept = SwarmEdgeAccept {
+            session_id: "edge-logging-1".to_string(),
+            member_kind: hello.member_kind.clone(),
+            member_ref: hello.member_ref.clone(),
+            zone_scope: hello.zone_scope.clone(),
+            accepted_version: SWARM_FRAME_VERSION as u32,
+            last_acked_frame_id: None,
+            last_projection_revisions: json!({}),
+            capability_refs: hello.capability_refs.clone(),
+            channel_refs: hello.channel_refs.clone(),
+            promise_refs: hello.promise_refs.clone(),
+            nonce: "accept-logging".to_string(),
+            issued_at: 1_700_000_000_010,
+            expires_at: Some(1_700_000_060_000),
+            sealed_claims: hello.sealed_claims.clone(),
+        };
+        let evidence = logging_carrier_edge_session_evidence(&accept, 1_700_000_000_011)
+            .expect("carrier evidence");
+        validate_carrier_edge_session_evidence(&evidence).expect("valid carrier evidence");
+        assert_eq!(
+            evidence.adapter_ref,
+            "adapter:gateway-association:websocket"
+        );
+        assert_eq!(
+            evidence.participant_ref,
+            format!("service:logging:{service_pk}")
+        );
+        assert_eq!(evidence.state, CARRIER_EDGE_SESSION_OPEN);
     }
 
     #[test]

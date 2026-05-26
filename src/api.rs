@@ -10,8 +10,10 @@ use constitute_protocol::{
     CAPABILITY_PROJECTION_OBSERVE, CaacEnvelope, ConsumerFloor, EncryptedDetailRef,
     EventFabricAccessClassRecord, EventFabricProcessorContractRecord,
     LOG_EVIDENCE_DETAIL_CUSTODY_ENCRYPTED_DETAIL_REF, LOG_EVIDENCE_PROFILE_EVENT_CYBERSEC_AUDIT,
-    LOG_EVIDENCE_PROFILE_EVENT_MEDIA_PATH, LOG_EVIDENCE_PROFILE_EVENT_RUNTIME_DIAGNOSTIC,
-    LOG_EVIDENCE_PROFILE_EVENT_SERVICE_EVENT, LOG_EVIDENCE_PROFILE_EVENT_STORAGE_ACCESS,
+    LOG_EVIDENCE_PROFILE_EVENT_EVIDENCE_REQUEST, LOG_EVIDENCE_PROFILE_EVENT_HOST_SECURITY,
+    LOG_EVIDENCE_PROFILE_EVENT_MEDIA_PATH, LOG_EVIDENCE_PROFILE_EVENT_NETWORK_EXPOSURE,
+    LOG_EVIDENCE_PROFILE_EVENT_RUNTIME_DIAGNOSTIC, LOG_EVIDENCE_PROFILE_EVENT_SERVICE_EVENT,
+    LOG_EVIDENCE_PROFILE_EVENT_SERVICE_HARDENING, LOG_EVIDENCE_PROFILE_EVENT_STORAGE_ACCESS,
     LOG_EVIDENCE_PROFILE_KIND, LogCategory, LogEventEnvelope, LogEvidenceProfile, LogOutcome,
     LogSeverity, MaterializationBudget, MaterializationSchemaPosture, ProjectionDeltaOp,
     ProjectionDeltaOpKind, ProjectionPathSegment, RECORD_ACCESS_EPOCH, RECORD_ACCESS_GROUP,
@@ -1658,6 +1660,10 @@ fn logging_event_fabric_access_classes(
                 LOG_EVIDENCE_PROFILE_EVENT_SERVICE_EVENT.to_string(),
                 LOG_EVIDENCE_PROFILE_EVENT_STORAGE_ACCESS.to_string(),
                 LOG_EVIDENCE_PROFILE_EVENT_MEDIA_PATH.to_string(),
+                LOG_EVIDENCE_PROFILE_EVENT_HOST_SECURITY.to_string(),
+                LOG_EVIDENCE_PROFILE_EVENT_SERVICE_HARDENING.to_string(),
+                LOG_EVIDENCE_PROFILE_EVENT_NETWORK_EXPOSURE.to_string(),
+                LOG_EVIDENCE_PROFILE_EVENT_EVIDENCE_REQUEST.to_string(),
             ],
             access_group_refs: vec![group_id.clone()],
             processor_role_refs: vec![
@@ -1865,6 +1871,10 @@ fn cybersec_evidence_profile(state: &ApiState, now: u64) -> Result<LogEvidencePr
             LOG_EVIDENCE_PROFILE_EVENT_SERVICE_EVENT.to_string(),
             LOG_EVIDENCE_PROFILE_EVENT_STORAGE_ACCESS.to_string(),
             LOG_EVIDENCE_PROFILE_EVENT_MEDIA_PATH.to_string(),
+            LOG_EVIDENCE_PROFILE_EVENT_HOST_SECURITY.to_string(),
+            LOG_EVIDENCE_PROFILE_EVENT_SERVICE_HARDENING.to_string(),
+            LOG_EVIDENCE_PROFILE_EVENT_NETWORK_EXPOSURE.to_string(),
+            LOG_EVIDENCE_PROFILE_EVENT_EVIDENCE_REQUEST.to_string(),
         ],
         retention_window: "90d".to_string(),
         safe_index_refs: vec![
@@ -3705,6 +3715,16 @@ mod tests {
                 .processor_role_refs
                 .contains(&"role:cybersec.processor".to_string())
         );
+        assert!(
+            access_class
+                .event_classes
+                .contains(&LOG_EVIDENCE_PROFILE_EVENT_SERVICE_HARDENING.to_string())
+        );
+        assert!(
+            access_class
+                .event_classes
+                .contains(&LOG_EVIDENCE_PROFILE_EVENT_NETWORK_EXPOSURE.to_string())
+        );
         assert_eq!(
             event_fabric["processorContracts"].as_array().unwrap().len(),
             2
@@ -3752,6 +3772,16 @@ mod tests {
         assert_eq!(
             cybersec_processor_contract.processor_role_ref,
             "role:cybersec.processor"
+        );
+        assert!(
+            cybersec_processor_contract
+                .input_event_classes
+                .contains(&LOG_EVIDENCE_PROFILE_EVENT_HOST_SECURITY.to_string())
+        );
+        assert!(
+            cybersec_processor_contract
+                .input_event_classes
+                .contains(&LOG_EVIDENCE_PROFILE_EVENT_EVIDENCE_REQUEST.to_string())
         );
         assert!(
             cybersec_processor_contract
